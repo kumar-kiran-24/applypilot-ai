@@ -16,6 +16,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.sessions import SessionMiddleware
 
 from app.api.v1.router import api_router
 from app.core.config import settings
@@ -26,7 +27,7 @@ from app.db.session import dispose_engine
 
 logger = get_logger(__name__)
 
-DB_STARTUP_TIMEOUT_SECONDS = 3.0
+DB_STARTUP_TIMEOUT_SECONDS = 20.0
 
 DESCRIPTION = """
 **ApplyPilot AI - Your Intelligent Job Application Agent**
@@ -81,6 +82,24 @@ app = FastAPI(
     lifespan=lifespan,
     contact={"name": "ApplyPilot AI"},
     license_info={"name": "Proprietary"},
+)
+
+OAUTH_SESSION_COOKIE = "applypilot_oauth_session"
+
+if not settings.OAUTH_SESSION_SECRET:
+    raise RuntimeError("OAUTH_SESSION_SECRET must be configured.")
+if len(settings.OAUTH_SESSION_SECRET) < 32:
+    raise RuntimeError("OAUTH_SESSION_SECRET must be at least 32 characters long.")
+
+# Holds the OAuth state/nonce between the Google redirect and the callback. The
+# cookie is signed with OAUTH_SESSION_SECRET, is Lax (survives the top-level
+# redirect back from Google) and is HTTPS-only outside local development.
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.OAUTH_SESSION_SECRET,
+    session_cookie=OAUTH_SESSION_COOKIE,
+    same_site="lax",
+    https_only=settings.session_cookie_https_only,
 )
 
 app.add_middleware(

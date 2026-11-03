@@ -1,7 +1,7 @@
+
 """ORM model package.
 
-Importing this package registers every model on ``Base.metadata``; Alembic and
-the test fixtures rely on that side effect.
+Importing this package registers every model on Base.metadata.
 """
 
 from app.models.application_answer import (
@@ -12,8 +12,10 @@ from app.models.application_answer import (
 from app.models.candidate import Candidate
 from app.models.education import Education
 from app.models.experience import EmploymentType, Experience
+from app.models.gmail_connection import GmailConnection
 from app.models.preference import JobPreference, RelocationPreference, WorkMode
 from app.models.project import Project
+from app.models.user import User
 
 __all__ = [
     "AnswerType",
@@ -22,9 +24,11 @@ __all__ = [
     "Education",
     "EmploymentType",
     "Experience",
+    "GmailConnection",
     "JobPreference",
     "Project",
     "RelocationPreference",
+    "User",
     "VerificationStatus",
     "WorkMode",
 ]
