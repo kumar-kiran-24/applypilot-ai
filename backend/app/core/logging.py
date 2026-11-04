@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 from datetime import datetime, timezone
 from typing import Any
@@ -32,6 +33,13 @@ SENSITIVE_KEY_MARKERS = (
 
 REDACTED = "[REDACTED]"
 
+# OAuth codes, state and tokens can appear inside a rendered message (uvicorn's
+# access log includes the full query string). They are redacted in-place so a
+# callback URL never writes a usable authorization code to the log stream.
+_SENSITIVE_QUERY_PARAM = re.compile(
+    r"(?i)\b(code|state|access_token|refresh_token|id_token|client_secret)=([^&\s\"]+)"
+)
+
 
 def is_sensitive_key(key: str) -> bool:
     lowered = key.lower()
@@ -48,6 +56,27 @@ def redact(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [redact(item) for item in value]
     return value
+
+
+class RedactingFilter(logging.Filter):
+    """Redact sensitive query parameters from the rendered log message.
+
+    Attached to the handler (not a logger) so records propagated from uvicorn's
+    loggers are filtered too. Structured ``extra`` fields are handled by
+    :class:`JsonFormatter`; this filter covers string messages such as access
+    log lines.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:  # pragma: no cover - malformed record
+            return True
+        redacted = _SENSITIVE_QUERY_PARAM.sub(r"\1=[REDACTED]", message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = ()
+        return True
 
 
 class JsonFormatter(logging.Formatter):
@@ -81,6 +110,7 @@ def setup_logging(settings: Settings | None = None, level: int | None = None) ->
 
     handler = logging.StreamHandler(stream=sys.stdout)
     handler.setFormatter(JsonFormatter())
+    handler.addFilter(RedactingFilter())
 
     root = logging.getLogger()
     root.handlers.clear()

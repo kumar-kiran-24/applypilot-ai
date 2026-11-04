@@ -92,14 +92,16 @@ if len(settings.OAUTH_SESSION_SECRET) < 32:
     raise RuntimeError("OAUTH_SESSION_SECRET must be at least 32 characters long.")
 
 # Holds the OAuth state/nonce between the Google redirect and the callback. The
-# cookie is signed with OAUTH_SESSION_SECRET, is Lax (survives the top-level
-# redirect back from Google) and is HTTPS-only outside local development.
+# cookie is signed with OAUTH_SESSION_SECRET, HttpOnly, Lax (survives the
+# top-level redirect back from Google), HTTPS-only outside local development and
+# short-lived: it is a one-flow artifact, not a login session.
 app.add_middleware(
     SessionMiddleware,
     secret_key=settings.OAUTH_SESSION_SECRET,
     session_cookie=OAUTH_SESSION_COOKIE,
     same_site="lax",
     https_only=settings.session_cookie_https_only,
+    max_age=settings.OAUTH_SESSION_MAX_AGE_SECONDS,
 )
 
 app.add_middleware(

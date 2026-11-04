@@ -47,6 +47,14 @@ The backend currently implements the **candidate domain** end to end:
 | POST/GET/PUT | `/api/v1/candidates/{candidate_id}/preferences` | Job preferences |
 | POST/GET | `/api/v1/candidates/{candidate_id}/answers` | Reusable answers |
 | PUT | `/api/v1/candidates/{candidate_id}/answers/{question_key}` | Update / create answer |
+| GET | `/api/v1/auth/google/login` | Start Google login |
+| GET | `/api/v1/auth/google/callback` | Google login callback (issues JWT) |
+| GET | `/api/v1/auth/me` | Authenticated user |
+| GET | `/api/v1/gmail/connect` | Start Gmail read-only authorization (JWT required) |
+| GET | `/api/v1/gmail/callback` | Complete Gmail authorization |
+| GET | `/api/v1/gmail/status` | Gmail connection status |
+| DELETE | `/api/v1/gmail/disconnect` | Revoke and remove stored Gmail credentials |
+| GET | `/api/v1/gmail/glassdoor/jobs` | Extract Glassdoor job emails (read-only) |
 
 ---
 
@@ -120,6 +128,8 @@ backend/
 |   |   |-- router.py               # v1 aggregation
 |   |   `-- endpoints/
 |   |       |-- health.py
+|   |       |-- auth.py             # Google login + /auth/me
+|   |       |-- gmail.py            # Gmail connect/callback/status/disconnect
 |   |       `-- candidates.py       # candidate + nested resource routes
 |   |-- core/
 |   |   |-- config.py               # typed settings + production validation
@@ -134,14 +144,15 @@ backend/
 |   |                               # JobPreference, ApplicationAnswer
 |   |-- schemas/                    # Pydantic v2 create/update/response models
 |   |-- repositories/               # candidate_repository.py (all SQL)
-|   |-- services/                   # candidate_service.py (business rules)
+|   |-- services/                   # candidate + Google/Gmail OAuth, Gmail API,
+|   |                               # token encryption, Glassdoor extraction
 |   |-- agents/
 |   |   |-- base_agent.py           # abstract async agent contract
 |   |   `-- job_analysis.py         # Groq-backed JD analysis agent
 |   `-- integrations/
 |       |-- llm/groq_client.py      # async Groq JSON client
 |       |-- google_drive/           # reserved
-|       `-- gmail/                  # reserved
+|       `-- gmail/                  # reserved (see app/services/gmail_*.py)
 |-- alembic/
 |   |-- env.py                      # async migration environment
 |   |-- script.py.mako
@@ -210,12 +221,19 @@ DEBUG=true
 DATABASE_URL="postgresql+asyncpg://postgres:YOUR_PASSWORD@localhost:5432/applypilot"
 
 JWT_SECRET_KEY="dev-insecure-jwt-secret-change-me"
-BACKEND_CORS_ORIGINS=["http://localhost:3000","http://127.0.0.1:3000"]
+OAUTH_SESSION_SECRET=""
+OAUTH_SESSION_MAX_AGE_SECONDS=600
+BACKEND_CORS_ORIGINS=["http://127.0.0.1:3000"]
 
 GROQ_API_KEY=""
 GOOGLE_CLIENT_ID=""
 GOOGLE_CLIENT_SECRET=""
-GOOGLE_REDIRECT_URI=""
+GOOGLE_REDIRECT_URI="http://127.0.0.1:8000/api/v1/auth/google/callback"
+GMAIL_REDIRECT_URI="http://127.0.0.1:8000/api/v1/gmail/callback"
+GMAIL_FRONTEND_REDIRECT_URI="http://127.0.0.1:3000/gmail/callback"
+GMAIL_TOKEN_ENCRYPTION_KEY=""
+GMAIL_API_TIMEOUT_SECONDS=30
+GMAIL_MAX_RETRIES=2
 QDRANT_URL="http://localhost:6333"
 QDRANT_API_KEY=""
 REDIS_URL="redis://localhost:6379/0"
@@ -227,10 +245,43 @@ Generate a real JWT secret when you leave development:
 python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
+Generate the Gmail token-encryption key once and store it with the database
+credentials:
+
+```powershell
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+`GMAIL_TOKEN_ENCRYPTION_KEY` is a Fernet key (urlsafe-base64 of exactly 32
+bytes). It encrypts Gmail refresh tokens at rest and must be different from
+`JWT_SECRET_KEY` and `OAUTH_SESSION_SECRET`. The application never creates or
+rotates it automatically: generate it once, back it up together with the
+database, and keep `.env` out of version control. If the key is lost, every
+stored refresh token becomes undecryptable and each user must reconnect Gmail;
+rotation therefore means decrypting with the old key and re-encrypting with the
+new one (or asking users to reconnect).
+
 `ENVIRONMENT=production` refuses to boot when the JWT secret is the development
 default or shorter than 32 characters, when `DEBUG=true`, when the default
-database URL is used, or when CORS is `*`. API keys for Groq, Google, Qdrant and
-Redis are **optional** at this stage - no module requires them yet.
+database URL is used, when CORS is `*`, when `GMAIL_TOKEN_ENCRYPTION_KEY` is
+missing, when `GMAIL_REDIRECT_URI` is missing or not `https`, or when
+`GMAIL_FRONTEND_REDIRECT_URI` is not `https` / its origin is not listed in
+`BACKEND_CORS_ORIGINS`. Groq, Qdrant and Redis keys remain optional.
+
+### Local host contract
+
+Use **`http://127.0.0.1`** for the frontend, the backend and both OAuth
+callbacks. `localhost` and `127.0.0.1` are different sites for cookies, and
+mixing them means the signed OAuth state cookie set by `/gmail/connect` (or
+`/auth/google/login`) is not sent to the callback. `GOOGLE_REDIRECT_URI` and
+`GMAIL_REDIRECT_URI` are set explicitly to the registered `127.0.0.1:8000`
+callbacks, and the frontend must call the connect endpoint with
+`credentials: "include"` from its own `127.0.0.1:3000` origin, which is the only
+entry allowed by `BACKEND_CORS_ORIGINS` locally. Serve the dev server on
+`127.0.0.1`, not `localhost` (Next.js: `next dev -H 127.0.0.1`; Vite:
+`vite --host 127.0.0.1`). The state cookie is `HttpOnly`, `SameSite=Lax`, lasts
+`OAUTH_SESSION_MAX_AGE_SECONDS` (10 minutes by default) and is `Secure` outside
+local development.
 
 ---
 
@@ -297,6 +348,9 @@ uvicorn app.main:app --reload
 - OpenAPI JSON: <http://127.0.0.1:8000/openapi.json>
 - Health: <http://127.0.0.1:8000/api/v1/health>
 
+Use `127.0.0.1` consistently with the frontend and the registered OAuth redirect
+URIs; see "Local host contract" in section 7.
+
 ```json
 { "status": "healthy", "service": "ApplyPilot AI Backend", "version": "0.1.0" }
 ```
@@ -329,6 +383,12 @@ duplicate email rejection, input validation, education, experience, projects,
 preferences, and application-answer creation/update/verification rules, plus the
 job-description analysis agent (prompt construction, JSON extraction, schema
 validation, repair behaviour and failure paths).
+
+The Gmail suite (`tests/test_gmail_*.py`, `tests/test_glassdoor_jobs.py`) mocks
+every Google call: Fernet encryption and key failures, OAuth state/session
+binding, different-account and unverified-email rejection, missing refresh
+tokens, duplicate connection handling, status/disconnect, Gmail API pagination,
+rate limits, revoked credentials and Glassdoor extraction/deduplication.
 
 The suite also contains one **real Groq API test**,
 `tests/test_job_analysis_agent.py::test_live_groq_job_description_analysis`.
@@ -430,7 +490,86 @@ GROQ_MAX_COMPLETION_TOKENS=4096
 GROQ_TEMPERATURE=0.0
 ```
 
-## 15. Roadmap
+## 15. Gmail integration
+
+ApplyPilot can read job-related email through a separate, incremental OAuth flow
+that never touches Google login.
+
+### Flow
+
+1. `GET /api/v1/gmail/connect` (bearer token required) creates an OAuth state in
+the signed session cookie, binds it to the authenticated user id and returns
+Google's consent URL. Requested scopes are `openid email profile` plus
+`https://www.googleapis.com/auth/gmail.readonly`, with `access_type=offline`,
+`include_granted_scopes=true` and `prompt=select_account consent` (account
+selection plus a reliable refresh token). Open the returned URL in a browser.
+2. `GET /api/v1/gmail/callback` validates that state, exchanges the code, checks
+the Google `sub` equals the ApplyPilot user's `google_sub`, requires a verified
+email and the Gmail scope, then stores the refresh token encrypted. A different
+Google account is rejected; no second ApplyPilot user is ever created and no
+token is returned. When `GMAIL_FRONTEND_REDIRECT_URI` is set, the browser is
+redirected (`303`) to that server-configured frontend route; otherwise the JSON
+connection payload is returned. The redirect target is never read from the
+request.
+3. `GET /api/v1/gmail/status` reports `connected`, the Gmail address, granted
+scopes and the connection timestamp.
+4. `DELETE /api/v1/gmail/disconnect` revokes the token at Google (failure is
+reported in `token_revoked` but never blocks the disconnect) and deletes the
+stored credential.
+5. `GET /api/v1/gmail/glassdoor/jobs?days=30&max_messages=25` refreshes a
+short-lived access token, searches ``from:glassdoor.com newer_than:<days>d``,
+extracts job recommendations and returns them without persisting anything.
+Duplicate postings (same Glassdoor job id or title/company/location) are dropped.
+
+### Security properties
+
+- Refresh tokens are encrypted with Fernet (`GMAIL_TOKEN_ENCRYPTION_KEY`) before
+  storage; access tokens stay in memory for one call.
+- The user id is never read from the callback query string - it comes from the
+  signed session cookie that `/gmail/connect` wrote.
+- Attachments are skipped (`attachmentId` parts are never decoded) and response
+  bodies are capped.
+- Gmail `nextPageToken` is followed with a hard cap; expired/revoked
+  credentials, missing scopes, 429s and API errors map to distinct errors with
+  safe messages.
+- Glassdoor is never scraped and CAPTCHA/MFA/anti-bot protections are never
+  bypassed: only emails the user already received are parsed.
+
+### Frontend contract
+
+The SPA obtains its ApplyPilot JWT from Google login, then:
+
+```js
+// credentials: "include" stores the signed OAuth state cookie
+const response = await fetch("http://127.0.0.1:8000/api/v1/gmail/connect", {
+  headers: { Authorization: `Bearer ${jwt}` },
+  credentials: "include",
+});
+const { authorization_url } = await response.json();
+window.location.assign(authorization_url);  // Google consent
+```
+
+After consent, the callback redirects to `GMAIL_FRONTEND_REDIRECT_URI`. The SPA
+then calls `GET /api/v1/gmail/status` with the JWT to show the connected address.
+Do not proxy the connect call through a different host: the cookie must belong to
+the API host and be sent back by the browser after Google's top-level redirect.
+
+### Google Cloud Console
+
+Register the Gmail callback URL (e.g.
+`http://127.0.0.1:8000/api/v1/gmail/callback`) in the same OAuth client as the
+login callback, and keep `gmail.readonly` enabled for the project. Register
+the exact same host (`http://127.0.0.1:8000`) for both callbacks so the OAuth
+state cookie is sent back.
+
+### Tests
+
+```powershell
+pytest tests/test_gmail_token_encryption.py tests/test_gmail_service.py -q
+pytest tests/test_gmail_api.py tests/test_glassdoor_jobs.py -q
+```
+
+## 16. Roadmap
 
 1. ~~Job description analysis agent~~ - implemented; next: expose it via an API
    endpoint and persist analyses.

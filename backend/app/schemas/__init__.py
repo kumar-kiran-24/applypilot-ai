@@ -14,6 +14,14 @@ from app.schemas.candidate import (
 from app.schemas.common import DeleteResponse, ErrorResponse, HealthResponse, ORMModel
 from app.schemas.education import EducationCreate, EducationResponse, EducationUpdate
 from app.schemas.experience import ExperienceCreate, ExperienceResponse, ExperienceUpdate
+from app.schemas.gmail import (
+    GlassdoorJobResponse,
+    GlassdoorJobsResponse,
+    GmailConnectionResponse,
+    GmailConnectResponse,
+    GmailDisconnectResponse,
+    GmailStatusResponse,
+)
 from app.schemas.preference import (
     JobPreferenceCreate,
     JobPreferenceResponse,
@@ -37,6 +45,12 @@ __all__ = [
     "ExperienceCreate",
     "ExperienceResponse",
     "ExperienceUpdate",
+    "GlassdoorJobResponse",
+    "GlassdoorJobsResponse",
+    "GmailConnectResponse",
+    "GmailConnectionResponse",
+    "GmailDisconnectResponse",
+    "GmailStatusResponse",
     "HealthResponse",
     "JobPreferenceCreate",
     "JobPreferenceResponse",
