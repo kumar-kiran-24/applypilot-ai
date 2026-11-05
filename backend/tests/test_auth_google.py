@@ -1,4 +1,4 @@
-"""Google OAuth and JWT authentication tests.
+"""Google OAuth, one-time login-code and JWT authentication tests.
 
 Google's network calls are mocked, so no real Google account, credentials or
 internet access are required. The OAuth state machine itself runs against the
@@ -10,13 +10,16 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock
+from urllib.parse import parse_qs, urlsplit
 
 import app.api.v1.endpoints.auth as auth_endpoints
 import jwt
 import pytest
 from app.core.config import settings
 from app.core.security import create_access_token
+from app.models.auth_code import AuthCode
 from app.models.user import User
+from app.services.auth_codes import hash_auth_code, issue_auth_code
 from app.services.google_oauth import GOOGLE_SCOPES, oauth
 from authlib.integrations.base_client.errors import MismatchingStateError
 from fastapi.responses import RedirectResponse
@@ -26,8 +29,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 LOGIN_PATH = "/api/v1/auth/google/login"
 CALLBACK_PATH = "/api/v1/auth/google/callback"
+EXCHANGE_PATH = "/api/v1/auth/login/exchange"
 ME_PATH = "/api/v1/auth/me"
 SESSION_COOKIE = "applypilot_oauth_session"
+FRONTEND_CALLBACK = settings.AUTH_FRONTEND_REDIRECT_URI
 
 GOOGLE_USER: dict[str, Any] = {
     "sub": "google-sub-123",
@@ -55,6 +60,14 @@ def mock_authorize_access_token(
     return exchange
 
 
+def redirect_query(response: Any) -> dict[str, list[str]]:
+    """Return the decoded query string of a redirect response."""
+    assert response.status_code == 303, response.text
+    location = response.headers["location"]
+    assert location.startswith(FRONTEND_CALLBACK)
+    return parse_qs(urlsplit(location).query)
+
+
 async def create_user(session_factory: SessionFactory, **overrides: Any) -> User:
     values: dict[str, Any] = {
         "google_sub": "existing-google-sub",
@@ -76,6 +89,29 @@ async def list_users(session_factory: SessionFactory) -> list[User]:
     async with session_factory() as session:
         result = await session.execute(select(User))
         return list(result.scalars())
+
+
+async def stored_codes(session_factory: SessionFactory) -> list[AuthCode]:
+    async with session_factory() as session:
+        result = await session.execute(select(AuthCode))
+        return list(result.scalars())
+
+
+async def issue_code_for(
+    session_factory: SessionFactory,
+    user_id: Any,
+    *,
+    ttl_seconds: int = 60,
+) -> str:
+    async with session_factory() as session:
+        code = await issue_auth_code(session, user_id, ttl_seconds=ttl_seconds)
+        await session.commit()
+        return code
+
+
+def as_utc(value: datetime) -> datetime:
+    """SQLite drops tzinfo; stored values are always UTC."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
 def bearer(token: str) -> dict[str, str]:
@@ -137,17 +173,19 @@ async def test_state_cookie_survives_the_redirect_flow(
 
     callback = await client.get(f"{CALLBACK_PATH}?code=auth-code&state=state-123")
 
-    assert callback.status_code == 200, callback.text
+    assert callback.status_code == 303, callback.text
+    assert "code" in redirect_query(callback)
     assert len(await list_users(session_factory)) == 1
 
 
-async def test_callback_rejects_unknown_state_without_leaking_it(client: AsyncClient) -> None:
+async def test_callback_rejects_unknown_state_without_leaking_it(
+    client: AsyncClient,
+) -> None:
     response = await client.get(f"{CALLBACK_PATH}?code=secret-code&state=unknown-state")
 
-    assert response.status_code == 400
-    assert response.json() == {"detail": auth_endpoints.STATE_FAILURE_DETAIL}
-    assert "secret-code" not in response.text
-    assert "CSRF" not in response.text
+    assert redirect_query(response)["error"] == [auth_endpoints.LOGIN_ERROR_STATE]
+    assert response.text == ""
+    assert "secret-code" not in response.headers["location"]
 
 
 async def test_mismatching_state_is_rejected(
@@ -161,8 +199,7 @@ async def test_mismatching_state_is_rejected(
 
     response = await client.get(f"{CALLBACK_PATH}?code=auth-code&state=state-123")
 
-    assert response.status_code == 400
-    assert response.json()["detail"] == auth_endpoints.STATE_FAILURE_DETAIL
+    assert redirect_query(response)["error"] == [auth_endpoints.LOGIN_ERROR_STATE]
 
 
 async def test_oauth_provider_error_is_rejected(client: AsyncClient) -> None:
@@ -170,9 +207,8 @@ async def test_oauth_provider_error_is_rejected(client: AsyncClient) -> None:
         f"{CALLBACK_PATH}?error=access_denied&error_description=User+denied&state=abc"
     )
 
-    assert response.status_code == 400
-    assert response.json() == {"detail": auth_endpoints.SAFE_AUTH_FAILURE_DETAIL}
-    assert "access_denied" not in response.text
+    assert redirect_query(response)["error"] == [auth_endpoints.LOGIN_ERROR_OAUTH]
+    assert "access_denied" not in response.headers["location"]
 
 
 # ---------------------------------------------------------------------------
@@ -188,8 +224,7 @@ async def test_missing_user_information_is_rejected(
 
     response = await client.get(f"{CALLBACK_PATH}?code=auth-code&state=state-123")
 
-    assert response.status_code == 401
-    assert response.json()["detail"] == "Google did not return verified identity information."
+    assert redirect_query(response)["error"] == [auth_endpoints.LOGIN_ERROR_IDENTITY]
 
 
 async def test_unverified_email_is_rejected(
@@ -199,8 +234,9 @@ async def test_unverified_email_is_rejected(
 
     response = await client.get(f"{CALLBACK_PATH}?code=auth-code&state=state-123")
 
-    assert response.status_code == 401
-    assert response.json()["detail"] == "A verified Google account is required."
+    assert redirect_query(response)["error"] == [
+        auth_endpoints.LOGIN_ERROR_EMAIL_UNVERIFIED
+    ]
 
 
 async def test_missing_google_subject_is_rejected(
@@ -210,7 +246,7 @@ async def test_missing_google_subject_is_rejected(
 
     response = await client.get(f"{CALLBACK_PATH}?code=auth-code&state=state-123")
 
-    assert response.status_code == 401
+    assert redirect_query(response)["error"] == [auth_endpoints.LOGIN_ERROR_IDENTITY]
 
 
 # ---------------------------------------------------------------------------
@@ -221,21 +257,24 @@ async def test_new_user_is_registered_and_can_call_me(
 ) -> None:
     mock_authorize_access_token(monkeypatch, google_token())
 
-    response = await client.get(f"{CALLBACK_PATH}?code=auth-code&state=state-123")
-
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["token_type"] == "bearer"
-    assert body["expires_in"] == settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
-    assert body["user"]["email"] == "ada@example.com"  # normalised
+    callback = await client.get(f"{CALLBACK_PATH}?code=auth-code&state=state-123")
+    code = redirect_query(callback)["code"][0]
 
     users = await list_users(session_factory)
     assert len(users) == 1
     user = users[0]
     assert user.google_sub == "google-sub-123"
+    assert user.email == "ada@example.com"  # normalised
     assert user.email_verified is True
     assert user.is_active is True
-    assert str(user.id) == body["user"]["id"]
+
+    exchange = await client.post(EXCHANGE_PATH, json={"code": code})
+    assert exchange.status_code == 200, exchange.text
+    body = exchange.json()
+    assert body["token_type"] == "bearer"
+    assert body["expires_in"] == settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    assert body["user"]["id"] == str(user.id)
+    assert body["user"]["email"] == "ada@example.com"
 
     me = await client.get(ME_PATH, headers=bearer(body["access_token"]))
     assert me.status_code == 200, me.text
@@ -250,11 +289,13 @@ async def test_existing_user_is_reused(
     )
     mock_authorize_access_token(monkeypatch, google_token())
 
-    response = await client.get(f"{CALLBACK_PATH}?code=auth-code&state=state-123")
+    callback = await client.get(f"{CALLBACK_PATH}?code=auth-code&state=state-123")
+    code = redirect_query(callback)["code"][0]
 
-    assert response.status_code == 200, response.text
-    assert response.json()["user"]["id"] == str(existing.id)
     assert len(await list_users(session_factory)) == 1
+    exchange = await client.post(EXCHANGE_PATH, json={"code": code})
+    assert exchange.status_code == 200, exchange.text
+    assert exchange.json()["user"]["id"] == str(existing.id)
 
 
 async def test_email_only_match_is_not_auto_linked(
@@ -267,9 +308,11 @@ async def test_email_only_match_is_not_auto_linked(
 
     response = await client.get(f"{CALLBACK_PATH}?code=auth-code&state=state-123")
 
-    assert response.status_code == 409
-    assert "already exists" in response.json()["detail"]
+    assert redirect_query(response)["error"] == [
+        auth_endpoints.LOGIN_ERROR_ACCOUNT_EXISTS
+    ]
     assert len(await list_users(session_factory)) == 1
+    assert await stored_codes(session_factory) == []
 
 
 async def test_inactive_user_is_rejected(
@@ -280,8 +323,155 @@ async def test_inactive_user_is_rejected(
 
     response = await client.get(f"{CALLBACK_PATH}?code=auth-code&state=state-123")
 
+    assert redirect_query(response)["error"] == [auth_endpoints.LOGIN_ERROR_INACTIVE]
+
+
+# ---------------------------------------------------------------------------
+# One-time login-code handoff
+# ---------------------------------------------------------------------------
+async def test_callback_redirect_carries_no_token_and_stores_only_a_hash(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, session_factory: SessionFactory
+) -> None:
+    mock_authorize_access_token(monkeypatch, google_token())
+
+    response = await client.get(f"{CALLBACK_PATH}?code=auth-code&state=state-123")
+
+    location = response.headers["location"]
+    code = redirect_query(response)["code"][0]
+    assert "access_token" not in location
+    assert "." not in code  # a JWT, not the code, would contain dots
+    assert response.text == ""
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert "ap_session" not in response.headers.get("set-cookie", "")
+
+    codes = await stored_codes(session_factory)
+    assert len(codes) == 1
+    assert codes[0].code_hash == hash_auth_code(code)
+    assert codes[0].code_hash != code
+    assert codes[0].consumed_at is None
+    assert as_utc(codes[0].expires_at) > datetime.now(timezone.utc)
+
+
+async def test_login_code_is_short_lived(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, session_factory: SessionFactory
+) -> None:
+    mock_authorize_access_token(monkeypatch, google_token())
+
+    before = datetime.now(timezone.utc)
+    await client.get(f"{CALLBACK_PATH}?code=auth-code&state=state-123")
+    after = datetime.now(timezone.utc)
+
+    codes = await stored_codes(session_factory)
+    expires_at = as_utc(codes[0].expires_at)
+
+    assert expires_at <= after + timedelta(seconds=60)
+    assert expires_at >= before
+
+
+async def test_exchange_consumes_the_code(
+    client: AsyncClient, session_factory: SessionFactory
+) -> None:
+    user = await create_user(session_factory)
+    code = await issue_code_for(session_factory, user.id)
+
+    response = await client.post(EXCHANGE_PATH, json={"code": code})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["user"]["id"] == str(user.id)
+    assert response.json()["access_token"]
+
+    codes = await stored_codes(session_factory)
+    assert codes[0].consumed_at is not None
+
+
+async def test_replayed_code_is_rejected(
+    client: AsyncClient, session_factory: SessionFactory
+) -> None:
+    user = await create_user(session_factory)
+    code = await issue_code_for(session_factory, user.id)
+
+    first = await client.post(EXCHANGE_PATH, json={"code": code})
+    assert first.status_code == 200, first.text
+
+    second = await client.post(EXCHANGE_PATH, json={"code": code})
+
+    assert second.status_code == 400
+    assert second.json() == {"detail": auth_endpoints.AUTH_CODE_USED_DETAIL}
+    assert "access_token" not in second.text
+
+
+async def test_expired_code_is_rejected(
+    client: AsyncClient, session_factory: SessionFactory
+) -> None:
+    user = await create_user(session_factory)
+    code = await issue_code_for(session_factory, user.id)
+
+    async with session_factory() as session:
+        row = await session.scalar(
+            select(AuthCode).where(AuthCode.code_hash == hash_auth_code(code))
+        )
+        assert row is not None
+        row.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        await session.commit()
+
+    response = await client.post(EXCHANGE_PATH, json={"code": code})
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": auth_endpoints.AUTH_CODE_EXPIRED_DETAIL}
+
+
+async def test_unknown_code_is_rejected_without_echoing_it(
+    client: AsyncClient,
+) -> None:
+    code = "unknown-code-" + "a" * 32
+
+    response = await client.post(EXCHANGE_PATH, json={"code": code})
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": auth_endpoints.AUTH_CODE_INVALID_DETAIL}
+    assert code not in response.text
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["", "short", "a" * 200, "has spaces " + "b" * 32, "semi;colon" * 5],
+)
+async def test_malformed_code_is_rejected_before_lookup(
+    client: AsyncClient, code: str
+) -> None:
+    response = await client.post(EXCHANGE_PATH, json={"code": code})
+
+    assert response.status_code == 422
+    if code:
+        assert code not in response.text
+
+
+async def test_code_for_inactive_user_is_rejected(
+    client: AsyncClient, session_factory: SessionFactory
+) -> None:
+    user = await create_user(session_factory, is_active=False)
+    code = await issue_code_for(session_factory, user.id)
+
+    response = await client.post(EXCHANGE_PATH, json={"code": code})
+
     assert response.status_code == 403
-    assert response.json()["detail"] == "This ApplyPilot account is inactive."
+    assert "inactive" in response.json()["detail"]
+
+
+async def test_code_is_not_logged(
+    client: AsyncClient, session_factory: SessionFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    user = await create_user(session_factory)
+    code = await issue_code_for(session_factory, user.id)
+
+    with caplog.at_level("DEBUG"):
+        response = await client.post(EXCHANGE_PATH, json={"code": code})
+
+    assert response.status_code == 200, response.text
+    rendered = "\n".join(record.getMessage() for record in caplog.records)
+    assert code not in rendered
+    assert response.json()["access_token"] not in rendered
 
 
 # ---------------------------------------------------------------------------

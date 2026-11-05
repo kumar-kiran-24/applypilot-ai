@@ -28,6 +28,7 @@ def production_settings(**overrides: Any) -> Settings:
         "BACKEND_CORS_ORIGINS": ["https://app.example.com"],
         "GMAIL_TOKEN_ENCRYPTION_KEY": VALID_KEY,
         "GMAIL_REDIRECT_URI": "https://api.example.com/api/v1/gmail/callback",
+        "AUTH_FRONTEND_REDIRECT_URI": "https://app.example.com/auth/callback",
     }
     values.update(overrides)
     return Settings(**values)
@@ -137,6 +138,7 @@ def test_local_frontend_redirect_is_allowed_in_development() -> None:
     settings = development_settings(
         BACKEND_CORS_ORIGINS=["http://localhost:3000"],
         GMAIL_FRONTEND_REDIRECT_URI="http://localhost:3000/gmail/callback",
+        AUTH_FRONTEND_REDIRECT_URI="http://localhost:3000/auth/callback",
     )
 
     assert settings.GMAIL_FRONTEND_REDIRECT_URI == "http://localhost:3000/gmail/callback"
@@ -153,6 +155,73 @@ def test_development_allows_missing_gmail_configuration() -> None:
     assert settings.GMAIL_REDIRECT_URI is None
     assert settings.GMAIL_FRONTEND_REDIRECT_URI is None
     assert settings.OAUTH_SESSION_MAX_AGE_SECONDS == 600
+    assert settings.AUTH_FRONTEND_REDIRECT_URI == "http://127.0.0.1:3000/auth/callback"
+    assert settings.AUTH_CODE_EXPIRE_SECONDS == 60
+
+
+# ---------------------------------------------------------------------------
+# Login handoff redirect (allow-listed, never an open redirect)
+# ---------------------------------------------------------------------------
+def test_auth_frontend_redirect_origin_must_be_in_cors_origins() -> None:
+    with pytest.raises(ValidationError) as excinfo:
+        development_settings(AUTH_FRONTEND_REDIRECT_URI="http://evil.example/auth/callback")
+
+    assert "AUTH_FRONTEND_REDIRECT_URI origin must be listed" in str(excinfo.value)
+
+
+def test_production_requires_https_auth_frontend_redirect() -> None:
+    with pytest.raises(ValidationError) as excinfo:
+        production_settings(
+            BACKEND_CORS_ORIGINS=["https://app.example.com", "http://127.0.0.1:3000"],
+            AUTH_FRONTEND_REDIRECT_URI="http://127.0.0.1:3000/auth/callback",
+        )
+
+    assert "AUTH_FRONTEND_REDIRECT_URI must use https in production" in str(
+        excinfo.value
+    )
+
+
+def test_production_rejects_the_development_login_redirect() -> None:
+    with pytest.raises(ValidationError) as excinfo:
+        production_settings(
+            BACKEND_CORS_ORIGINS=["https://app.example.com", "http://127.0.0.1:3000"],
+            AUTH_FRONTEND_REDIRECT_URI="http://127.0.0.1:3000/auth/callback",
+        )
+
+    assert "must be set to the deployed frontend URL in production" in str(
+        excinfo.value
+    )
+
+
+@pytest.mark.parametrize(
+    "redirect",
+    [
+        "not-a-url",
+        "/auth/callback",
+        "http://user:pass@127.0.0.1:3000/auth/callback",
+        "http://127.0.0.1:3000/auth/callback#fragment",
+        "http://127.0.0.1:3000/auth/callback?next=https://evil.example",
+    ],
+)
+def test_malformed_auth_frontend_redirects_are_rejected(redirect: str) -> None:
+    with pytest.raises(ValidationError):
+        development_settings(AUTH_FRONTEND_REDIRECT_URI=redirect)
+
+
+def test_auth_frontend_redirect_blank_value_uses_the_local_default() -> None:
+    settings = development_settings(AUTH_FRONTEND_REDIRECT_URI="  ")
+
+    assert settings.AUTH_FRONTEND_REDIRECT_URI == "http://127.0.0.1:3000/auth/callback"
+
+
+def test_auth_code_lifetime_is_bounded_to_a_minute() -> None:
+    assert development_settings(AUTH_CODE_EXPIRE_SECONDS=10).AUTH_CODE_EXPIRE_SECONDS == 10
+
+    with pytest.raises(ValidationError):
+        development_settings(AUTH_CODE_EXPIRE_SECONDS=61)
+
+    with pytest.raises(ValidationError):
+        development_settings(AUTH_CODE_EXPIRE_SECONDS=5)
 
 
 def test_oauth_session_cookie_lifetime_is_bounded() -> None:

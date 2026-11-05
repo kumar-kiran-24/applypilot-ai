@@ -18,6 +18,7 @@ from app.core.exceptions import ConfigurationError
 from app.core.security import create_access_token
 from app.models.gmail_connection import GmailConnection
 from app.models.user import User
+from app.services import job_discovery
 from app.services.gmail_oauth import GMAIL_SCOPES, gmail_oauth, gmail_redirect_uri
 from app.services.gmail_service import (
     GmailAccessToken,
@@ -743,8 +744,10 @@ async def test_glassdoor_jobs_rejects_revoked_credentials(
 ) -> None:
     user = await create_user(session_factory)
     await create_connection(session_factory, user)
+    # Discovery now lives in a shared service used by both the read-only
+    # endpoint and the persisted job store.
     monkeypatch.setattr(
-        gmail_endpoints,
+        job_discovery,
         "refresh_gmail_access_token",
         AsyncMock(side_effect=GmailCredentialsError()),
     )
@@ -772,7 +775,7 @@ async def test_glassdoor_jobs_returns_extracted_job_recommendations(
     captured: dict[str, Any] = {}
 
     monkeypatch.setattr(
-        gmail_endpoints,
+        job_discovery,
         "refresh_gmail_access_token",
         AsyncMock(return_value=GmailAccessToken("test-access", 3600, ())),
     )
@@ -798,7 +801,7 @@ async def test_glassdoor_jobs_returns_extracted_job_recommendations(
             captured["ids"] = message_ids
             return [glassdoor_message()]
 
-    monkeypatch.setattr(gmail_endpoints, "GmailClient", FakeGmailClient)
+    monkeypatch.setattr(job_discovery, "GmailClient", FakeGmailClient)
 
     response = await client.get(
         f"{JOBS_PATH}?days=7&max_messages=5",
