@@ -45,7 +45,12 @@ export function UserMenu({ user }: { user: AuthUser }) {
         aria-expanded={open}
         className="flex items-center gap-2.5 rounded-xl border border-white/10 bg-white/[0.03] py-1.5 pl-1.5 pr-2.5 text-left transition-colors hover:border-white/20 hover:bg-white/[0.06] focus-visible:ring-2 focus-visible:ring-brand-blue/60"
       >
-        <Avatar name={user.full_name} email={user.email} src={user.profile_picture} size={28} />
+        <Avatar
+          name={user.full_name}
+          email={user.email}
+          src={user.profile_picture}
+          size={28}
+        />
         <span className="hidden min-w-0 sm:block">
           <span className="block max-w-[160px] truncate text-[13px] font-medium leading-tight text-ink">
             {user.full_name}
@@ -54,7 +59,10 @@ export function UserMenu({ user }: { user: AuthUser }) {
             {user.email}
           </span>
         </span>
-        <ChevronDown aria-hidden="true" className="h-3.5 w-3.5 text-ink-subtle" />
+        <ChevronDown
+          aria-hidden="true"
+          className="h-3.5 w-3.5 text-ink-subtle"
+        />
       </button>
 
       {open ? (
@@ -64,7 +72,9 @@ export function UserMenu({ user }: { user: AuthUser }) {
           className="absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-2xl border border-white/10 bg-navy-850/95 shadow-card backdrop-blur-xl animate-fade-in"
         >
           <div className="border-b border-white/[0.06] px-4 py-3">
-            <p className="truncate text-sm font-medium text-ink">{user.full_name}</p>
+            <p className="truncate text-sm font-medium text-ink">
+              {user.full_name}
+            </p>
             <p className="truncate text-xs text-ink-muted">{user.email}</p>
           </div>
           <div className="p-1.5">

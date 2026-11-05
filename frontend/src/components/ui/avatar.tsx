@@ -26,7 +26,10 @@ export function Avatar({
         {...dimension}
         unoptimized
         referrerPolicy="no-referrer"
-        className={cn("rounded-full border border-white/15 object-cover", className)}
+        className={cn(
+          "rounded-full border border-white/15 object-cover",
+          className,
+        )}
       />
     );
   }

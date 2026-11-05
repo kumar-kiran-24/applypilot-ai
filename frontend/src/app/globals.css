@@ -13,10 +13,21 @@
 
   body {
     background-color: #070d1a;
-    background-image:
-      radial-gradient(1100px 520px at 12% -12%, rgba(59, 130, 246, 0.16), transparent 60%),
-      radial-gradient(920px 480px at 88% -4%, rgba(139, 92, 246, 0.13), transparent 58%),
-      radial-gradient(900px 600px at 50% 110%, rgba(30, 64, 175, 0.12), transparent 65%);
+    background-image: radial-gradient(
+        1100px 520px at 12% -12%,
+        rgba(59, 130, 246, 0.16),
+        transparent 60%
+      ),
+      radial-gradient(
+        920px 480px at 88% -4%,
+        rgba(139, 92, 246, 0.13),
+        transparent 58%
+      ),
+      radial-gradient(
+        900px 600px at 50% 110%,
+        rgba(30, 64, 175, 0.12),
+        transparent 65%
+      );
     background-attachment: fixed;
   }
 

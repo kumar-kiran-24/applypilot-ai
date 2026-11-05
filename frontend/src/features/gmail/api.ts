@@ -19,11 +19,15 @@ export function fetchGmailStatus(): Promise<GmailStatus> {
 
 /** Starts the OAuth flow; the API state cookie is relayed by the BFF. */
 export function startGmailConnection(): Promise<GmailConnectResponse> {
-  return bffFetch<GmailConnectResponse>("/api/gmail/connect", { method: "POST" });
+  return bffFetch<GmailConnectResponse>("/api/gmail/connect", {
+    method: "POST",
+  });
 }
 
 export function disconnectGmail(): Promise<GmailDisconnectResponse> {
-  return apiFetch<GmailDisconnectResponse>("gmail/disconnect", { method: "DELETE" });
+  return apiFetch<GmailDisconnectResponse>("gmail/disconnect", {
+    method: "DELETE",
+  });
 }
 
 export function fetchGlassdoorJobs(

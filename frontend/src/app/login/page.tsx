@@ -40,8 +40,6 @@ export default async function LoginPage({
   }
 
   const params = await searchParams;
-  const nextParam = typeof params.next === "string" ? params.next : "/dashboard";
-  const nextPath = nextParam.startsWith("/") && !nextParam.startsWith("//") ? nextParam : "/dashboard";
 
   return (
     <main className="relative flex min-h-screen flex-col lg:flex-row">
@@ -62,11 +60,13 @@ export default async function LoginPage({
             Your Intelligent Job Application Agent
           </p>
           <h2 className="mt-4 text-4xl font-semibold leading-[1.15] tracking-tight text-ink xl:text-[42px]">
-            Discover, analyze and match — <span className="brand-gradient-text">without the busywork.</span>
+            Discover, analyze and match —{" "}
+            <span className="brand-gradient-text">without the busywork.</span>
           </h2>
           <p className="mt-4 text-sm leading-relaxed text-ink-muted">
-            ApplyPilot reads the job alerts you already receive, keeps them organized, and prepares
-            your applications. You decide what gets sent.
+            ApplyPilot reads the job alerts you already receive, keeps them
+            organized, and prepares your applications. You decide what gets
+            sent.
           </p>
 
           <ul className="mt-10 space-y-5">
@@ -78,7 +78,9 @@ export default async function LoginPage({
                 />
                 <div>
                   <p className="text-sm font-medium text-ink">{item.title}</p>
-                  <p className="mt-1 text-[13px] leading-relaxed text-ink-muted">{item.body}</p>
+                  <p className="mt-1 text-[13px] leading-relaxed text-ink-muted">
+                    {item.body}
+                  </p>
                 </div>
               </li>
             ))}
@@ -95,13 +97,13 @@ export default async function LoginPage({
           <Logo />
         </div>
         <LoginForm
-          nextPath={nextPath}
           expired={params.expired === "1"}
           signedOut={params.signedOut === "1"}
         />
         <p className="mt-6 max-w-md text-center text-[11px] leading-relaxed text-ink-subtle">
-          By continuing you agree that ApplyPilot may read job-related email from the Google
-          account you authorize. You can disconnect Gmail at any time.
+          By continuing you agree that ApplyPilot may read job-related email
+          from the Google account you authorize. You can disconnect Gmail at any
+          time.
         </p>
       </section>
     </main>

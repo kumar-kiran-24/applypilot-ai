@@ -8,7 +8,11 @@ import {
   gmailKeys,
   startGmailConnection,
 } from "@/features/gmail/api";
-import type { GmailConnectResponse, GmailDisconnectResponse, GmailStatus } from "@/types/api";
+import type {
+  GmailConnectResponse,
+  GmailDisconnectResponse,
+  GmailStatus,
+} from "@/types/api";
 
 export function useGmailStatus() {
   return useQuery<GmailStatus>({

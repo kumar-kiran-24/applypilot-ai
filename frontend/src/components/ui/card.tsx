@@ -37,7 +37,9 @@ export function CardTitle({
   children: React.ReactNode;
 }) {
   return (
-    <h2 className={cn("text-sm font-semibold tracking-tight text-ink", className)}>
+    <h2
+      className={cn("text-sm font-semibold tracking-tight text-ink", className)}
+    >
       {children}
     </h2>
   );
@@ -50,7 +52,9 @@ export function CardDescription({
   className?: string;
   children: React.ReactNode;
 }) {
-  return <p className={cn("mt-1 text-xs text-ink-muted", className)}>{children}</p>;
+  return (
+    <p className={cn("mt-1 text-xs text-ink-muted", className)}>{children}</p>
+  );
 }
 
 export function CardContent({

@@ -12,7 +12,8 @@ export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <nav aria-label="Main navigation" className="space-y-1">
       {NAV_ITEMS.map((item) => {
-        const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
+        const active =
+          pathname === item.href || pathname.startsWith(`${item.href}/`);
         const Icon = item.icon;
 
         return (
@@ -32,7 +33,9 @@ export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
               aria-hidden="true"
               className={cn(
                 "h-4 w-4 shrink-0 transition-colors",
-                active ? "text-sky-300" : "text-ink-subtle group-hover:text-ink-muted",
+                active
+                  ? "text-sky-300"
+                  : "text-ink-subtle group-hover:text-ink-muted",
               )}
             />
             <span className="truncate">{item.label}</span>

@@ -70,9 +70,22 @@ export function initials(name: string, email: string): string {
   return email.slice(0, 2).toUpperCase();
 }
 
+/** Human-readable file size ("1.4 MB") for document lists. */
+export function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 KB";
+  }
+  if (bytes < 1024 * 1024) {
+    return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 /** Shorten long scope URLs for badges. */
 export function humanizeScope(scope: string): string {
-  return scope.replace("https://www.googleapis.com/auth/", "gmail:").replace("openid", "openid");
+  return scope
+    .replace("https://www.googleapis.com/auth/", "gmail:")
+    .replace("openid", "openid");
 }
 
 function parseDate(value: string | null | undefined): Date | null {

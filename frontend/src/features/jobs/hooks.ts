@@ -1,27 +1,88 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { fetchGlassdoorJobs, gmailKeys } from "@/features/gmail/api";
-import type { GlassdoorJobsResponse } from "@/types/api";
+import {
+  bulkMatchJob,
+  discoverJobs,
+  fetchJobMatches,
+  fetchJobs,
+  fetchMatchingSummary,
+  jobKeys,
+  matchJob,
+} from "@/features/jobs/api";
+import type {
+  BulkMatchRequest,
+  BulkMatchResponse,
+  DiscoverJobsResponse,
+  JobMatchesResponse,
+  JobListResponse,
+  MatchingSummary,
+} from "@/types/api";
 
-export interface UseGlassdoorJobsOptions {
-  days: number;
-  maxMessages: number;
-  enabled: boolean;
+export function useJobs({ limit = 50, offset = 0 } = {}) {
+  return useQuery<JobListResponse>({
+    queryKey: jobKeys.list(limit, offset),
+    queryFn: () => fetchJobs(limit, offset),
+    staleTime: 30_000,
+  });
 }
 
 /**
- * Read-only Glassdoor discovery. Each scan is a live Gmail query, so the query
- * only runs when the caller explicitly enables it (or for the dashboard preview
- * once Gmail is connected).
+ * Discovery stores the extracted postings so matching has stable job ids. A
+ * 404/409 means Gmail is not connected or the grant is dead; callers surface
+ * the reconnect action.
  */
-export function useGlassdoorJobs({ days, maxMessages, enabled }: UseGlassdoorJobsOptions) {
-  return useQuery<GlassdoorJobsResponse>({
-    queryKey: gmailKeys.jobs(days, maxMessages),
-    queryFn: () => fetchGlassdoorJobs(days, maxMessages),
+export function useDiscoverJobs() {
+  const queryClient = useQueryClient();
+  return useMutation<DiscoverJobsResponse, Error, { days: number; maxMessages: number }>({
+    mutationFn: ({ days, maxMessages }) => discoverJobs(days, maxMessages),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: jobKeys.all });
+      await queryClient.invalidateQueries({ queryKey: jobKeys.summary });
+    },
+  });
+}
+
+export function useJobMatches(jobId: string, { enabled = true } = {}) {
+  return useQuery<JobMatchesResponse>({
+    queryKey: jobKeys.matches(jobId),
+    queryFn: () => fetchJobMatches(jobId),
     enabled,
-    staleTime: 60_000,
     retry: false,
+  });
+}
+
+export function useMatchJob(jobId: string) {
+  const queryClient = useQueryClient();
+  return useMutation<JobMatchesResponse, Error, { force?: boolean } | void>({
+    mutationFn: (variables) => matchJob(jobId, variables?.force ?? false),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: jobKeys.matches(jobId) });
+      await queryClient.invalidateQueries({ queryKey: jobKeys.all });
+      await queryClient.invalidateQueries({ queryKey: jobKeys.summary });
+    },
+  });
+}
+
+export function useBulkMatchJobs() {
+  const queryClient = useQueryClient();
+  return useMutation<BulkMatchResponse, Error, BulkMatchRequest>({
+    mutationFn: (request) => bulkMatchJob(request),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: jobKeys.all });
+      await queryClient.invalidateQueries({
+        queryKey: ["jobs", "matches"],
+      });
+      await queryClient.invalidateQueries({ queryKey: jobKeys.summary });
+    },
+  });
+}
+
+export function useMatchingSummary() {
+  return useQuery<MatchingSummary>({
+    queryKey: jobKeys.summary,
+    queryFn: fetchMatchingSummary,
+    staleTime: 30_000,
   });
 }

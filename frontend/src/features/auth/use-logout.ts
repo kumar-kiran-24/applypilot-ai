@@ -8,7 +8,9 @@ export function useLogout() {
   const queryClient = useQueryClient();
   return useMutation<void, Error, void>({
     mutationFn: async () => {
-      await bffFetch<{ signedOut: boolean }>("/api/auth/logout", { method: "POST" });
+      await bffFetch<{ signedOut: boolean }>("/api/auth/logout", {
+        method: "POST",
+      });
     },
     onSettled: () => {
       queryClient.clear();

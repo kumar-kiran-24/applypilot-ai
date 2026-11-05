@@ -1,8 +1,9 @@
 import { ApiError, toApiError } from "@/lib/api/errors";
 
 interface RequestOptions {
-  method?: "GET" | "POST" | "DELETE";
+  method?: "GET" | "POST" | "DELETE" | "PATCH";
   body?: unknown;
+  formData?: FormData;
   timeoutMs?: number;
 }
 
@@ -11,16 +12,29 @@ interface RequestOptions {
  * JWT lives in an HttpOnly cookie owned by the server, so it is never readable
  * or attachable from client code. A 401 means the cookie is gone or expired.
  */
-export async function bffFetch<T>(url: string, options: RequestOptions = {}): Promise<T> {
+export async function bffFetch<T>(
+  url: string,
+  options: RequestOptions = {},
+): Promise<T> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 30_000);
+  const timeout = setTimeout(
+    () => controller.abort(),
+    options.timeoutMs ?? 30_000,
+  );
 
   let response: Response;
   try {
     response = await fetch(url, {
       method: options.method ?? "GET",
-      headers: options.body ? { "Content-Type": "application/json" } : undefined,
-      body: options.body ? JSON.stringify(options.body) : undefined,
+      headers: options.body
+        ? { "Content-Type": "application/json" }
+        : undefined,
+      // Let fetch set the multipart boundary for uploads.
+      body: options.formData
+        ? options.formData
+        : options.body
+          ? JSON.stringify(options.body)
+          : undefined,
       credentials: "same-origin",
       cache: "no-store",
       signal: controller.signal,
@@ -56,6 +70,9 @@ export async function bffFetch<T>(url: string, options: RequestOptions = {}): Pr
 }
 
 /** Call a backend route through the allow-listed BFF proxy. */
-export function apiFetch<T>(path: string, options: RequestOptions = {}): Promise<T> {
+export function apiFetch<T>(
+  path: string,
+  options: RequestOptions = {},
+): Promise<T> {
   return bffFetch<T>(`/api/backend/${path}`, options);
 }

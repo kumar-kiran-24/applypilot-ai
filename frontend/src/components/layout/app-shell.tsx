@@ -59,7 +59,8 @@ export function AppShell({
             </Badge>
           </div>
           <p className="mt-2 text-[11px] leading-relaxed text-ink-subtle">
-            ApplyPilot never applies to a job without your explicit confirmation.
+            ApplyPilot never applies to a job without your explicit
+            confirmation.
           </p>
         </div>
       </aside>
@@ -120,14 +121,17 @@ export function AppShell({
           </div>
         </header>
 
-        <main id="main-content" className="mx-auto max-w-6xl px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
+        <main
+          id="main-content"
+          className="mx-auto max-w-6xl px-4 py-6 sm:px-6 sm:py-8 lg:px-8"
+        >
           {children}
         </main>
 
         <footer className="mx-auto max-w-6xl px-4 pb-8 pt-2 text-[11px] text-ink-subtle sm:px-6 lg:px-8">
           <p>
-            ApplyPilot AI · Phase 1 dashboard. Gmail access is read-only and tokens are stored
-            encrypted by the backend.
+            ApplyPilot AI · Phase 1 dashboard. Gmail access is read-only and
+            tokens are stored encrypted by the backend.
           </p>
         </footer>
       </div>
