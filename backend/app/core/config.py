@@ -19,6 +19,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Development-only placeholder. Production refuses to start with this value.
 DEV_JWT_SECRET_KEY = "dev-insecure-jwt-secret-change-me"
 DEV_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:5432/applypilot"
+# Development-only login handoff target. Production must configure the deployed
+# frontend URL (HTTPS) and list its origin in BACKEND_CORS_ORIGINS.
+DEV_AUTH_FRONTEND_REDIRECT_URI = "http://127.0.0.1:3000/auth/callback"
 
 Environment = Literal["development", "testing", "staging", "production"]
 
@@ -91,10 +94,40 @@ class Settings(BaseSettings):
     GMAIL_API_TIMEOUT_SECONDS: float = Field(default=30.0, ge=1, le=120)
     GMAIL_MAX_RETRIES: int = Field(default=2, ge=0, le=5)
 
+    # --- Application automation ---------------------------------------------
+    # Browser automation is opt-in and off by default: every workflow works
+    # without it through the guided manual path. Enabling it requires the
+    # optional Playwright installation (see backend/README.md).
+    APPLICATION_AUTOMATION_ENABLED: bool = False
+    APPLICATION_BROWSER_HEADLESS: bool = True
+    APPLICATION_BROWSER_TIMEOUT_MS: int = Field(default=30_000, ge=5_000, le=120_000)
+    # Debug screenshots live outside the web root and outside version control.
+    APPLICATION_SCREENSHOT_DIR: str = "var/application-screenshots"
+    # Hard cap on form fields accepted from an inspected page.
+    APPLICATION_MAX_FORM_FIELDS: int = Field(default=150, ge=1, le=500)
+
+    # --- Resume storage ------------------------------------------------------
+    # Files live outside the web root and outside version control. The backend
+    # only ever hands clients an opaque resume id, never a storage path.
+    RESUME_STORAGE_BACKEND: Literal["local"] = "local"
+    RESUME_STORAGE_DIR: str = "var/resumes"
+    RESUME_MAX_FILE_SIZE_BYTES: int = Field(
+        default=10 * 1024 * 1024, ge=1024, le=50 * 1024 * 1024
+    )
+
     # --- Auth ----------------------------------------------------------------
     JWT_SECRET_KEY: str = DEV_JWT_SECRET_KEY
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=60, ge=1, le=60 * 24 * 7)
+    # Where the browser lands after Google sign-in: a dedicated frontend route
+    # that exchanges the one-time code for the HttpOnly session cookie. It must
+    # be an absolute http(s) URL whose origin appears in BACKEND_CORS_ORIGINS,
+    # so a bad setting can never become an open redirect. The URI is fixed by
+    # configuration and never taken from the (untrusted) request.
+    AUTH_FRONTEND_REDIRECT_URI: str = DEV_AUTH_FRONTEND_REDIRECT_URI
+    # Lifetime of a one-time login code. Deliberately short (<= 60 seconds):
+    # it only has to survive the browser redirect from the API to the app.
+    AUTH_CODE_EXPIRE_SECONDS: int = Field(default=60, ge=10, le=60)
 
     # --- CORS ----------------------------------------------------------------
     BACKEND_CORS_ORIGINS: list[str] = Field(
@@ -132,6 +165,25 @@ class Settings(BaseSettings):
                 return value  # let pydantic parse the JSON array
             return [origin.strip() for origin in raw.split(",") if origin.strip()]
         return value
+
+    @field_validator("RESUME_STORAGE_DIR")
+    @classmethod
+    def _validate_resume_storage_dir(cls, value: str) -> str:
+        """Require a non-empty directory; empty would write next to the code."""
+        candidate = (value or "").strip()
+        if not candidate:
+            msg = "RESUME_STORAGE_DIR must not be empty."
+            raise ValueError(msg)
+        return candidate
+
+    @field_validator("APPLICATION_SCREENSHOT_DIR")
+    @classmethod
+    def _validate_screenshot_dir(cls, value: str) -> str:
+        candidate = (value or "").strip()
+        if not candidate:
+            msg = "APPLICATION_SCREENSHOT_DIR must not be empty."
+            raise ValueError(msg)
+        return candidate
 
     @field_validator("DATABASE_URL")
     @classmethod
@@ -178,6 +230,29 @@ class Settings(BaseSettings):
         if value is None or not value.strip():
             return None
         return value.strip()
+
+    @field_validator("AUTH_FRONTEND_REDIRECT_URI")
+    @classmethod
+    def _validate_auth_frontend_redirect(cls, value: str) -> str:
+        """Require an absolute, credential-free http(s) URL without a query."""
+        candidate = (value or "").strip()
+        if not candidate:
+            # An empty template value falls back to the documented local route.
+            return DEV_AUTH_FRONTEND_REDIRECT_URI
+        parts = urlsplit(candidate)
+        if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+            msg = "AUTH_FRONTEND_REDIRECT_URI must be an absolute http(s) URL."
+            raise ValueError(msg)
+        if parts.username is not None or parts.password is not None:
+            msg = "AUTH_FRONTEND_REDIRECT_URI must not contain credentials."
+            raise ValueError(msg)
+        if parts.fragment:
+            msg = "AUTH_FRONTEND_REDIRECT_URI must not contain a fragment."
+            raise ValueError(msg)
+        if parts.query:
+            msg = "AUTH_FRONTEND_REDIRECT_URI must not contain a query string."
+            raise ValueError(msg)
+        return candidate
 
     @field_validator("GMAIL_REDIRECT_URI", "GMAIL_FRONTEND_REDIRECT_URI")
     @classmethod
@@ -242,6 +317,22 @@ class Settings(BaseSettings):
                 problems.append(
                     "GMAIL_FRONTEND_REDIRECT_URI origin must be listed in "
                     "BACKEND_CORS_ORIGINS"
+                )
+
+        auth_redirect = urlsplit(self.AUTH_FRONTEND_REDIRECT_URI)
+        allowed_origins = {_url_origin(origin) for origin in self.BACKEND_CORS_ORIGINS}
+        if _url_origin(self.AUTH_FRONTEND_REDIRECT_URI) not in allowed_origins:
+            problems.append(
+                "AUTH_FRONTEND_REDIRECT_URI origin must be listed in "
+                "BACKEND_CORS_ORIGINS"
+            )
+        if self.is_production:
+            if auth_redirect.scheme.lower() != "https":
+                problems.append("AUTH_FRONTEND_REDIRECT_URI must use https in production")
+            if self.AUTH_FRONTEND_REDIRECT_URI == DEV_AUTH_FRONTEND_REDIRECT_URI:
+                problems.append(
+                    "AUTH_FRONTEND_REDIRECT_URI must be set to the deployed "
+                    "frontend URL in production"
                 )
 
         if problems:

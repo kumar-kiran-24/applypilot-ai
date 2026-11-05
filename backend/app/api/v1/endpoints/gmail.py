@@ -39,10 +39,6 @@ from app.schemas.gmail import (
     GmailDisconnectResponse,
     GmailStatusResponse,
 )
-from app.services.glassdoor_jobs import (
-    extract_glassdoor_jobs_from_messages,
-    glassdoor_search_query,
-)
 from app.services.gmail_oauth import (
     GMAIL_AUTHORIZATION_PARAMS,
     GMAIL_READONLY_SCOPE,
@@ -52,10 +48,7 @@ from app.services.gmail_oauth import (
     gmail_redirect_uri,
 )
 from app.services.gmail_service import (
-    GmailClient,
-    GmailCredentialsError,
     GmailNotConnectedError,
-    refresh_gmail_access_token,
     revoke_gmail_access,
 )
 from app.services.gmail_token_encryption import (
@@ -64,6 +57,7 @@ from app.services.gmail_token_encryption import (
     validate_encryption_key,
 )
 from app.services.google_oauth import describe_oauth_error, fetch_google_userinfo
+from app.services.job_discovery import fetch_glassdoor_jobs
 
 logger = get_logger(__name__)
 
@@ -551,42 +545,24 @@ async def list_glassdoor_jobs(
     max_messages: Annotated[int, Query(ge=1, le=100, description="Maximum emails to inspect")] = 25,
 ) -> GlassdoorJobsResponse:
     """Search Gmail for Glassdoor job alerts and extract their jobs."""
-    connection = await db.scalar(
-        select(GmailConnection).where(
-            GmailConnection.user_id == current_user.id,
-            GmailConnection.is_active.is_(True),
-        )
+    discovery = await fetch_glassdoor_jobs(
+        db,
+        current_user,
+        days=days,
+        max_messages=max_messages,
     )
-    if connection is None:
-        raise GmailNotConnectedError()
-
-    try:
-        access = await refresh_gmail_access_token(connection)
-    except GmailCredentialsError:
-        # The stored credential is dead: reflect that in the status endpoint.
-        connection.is_active = False
-        await db.commit()
-        raise
-
-    async with GmailClient(access.access_token) as gmail:
-        message_ids = await gmail.list_message_ids(
-            query=glassdoor_search_query(days),
-            max_results=max_messages,
-        )
-        messages = await gmail.get_messages(message_ids)
-
-    jobs = extract_glassdoor_jobs_from_messages(messages)
+    jobs = discovery.jobs
     logger.info(
         "Glassdoor job discovery completed",
         extra={
             "stage": "glassdoor_discovery",
             "user_id": str(current_user.id),
-            "messages_scanned": len(messages),
+            "messages_scanned": discovery.messages_scanned,
             "jobs_found": len(jobs),
         },
     )
     return GlassdoorJobsResponse(
-        messages_scanned=len(messages),
+        messages_scanned=discovery.messages_scanned,
         jobs_found=len(jobs),
         jobs=[GlassdoorJobResponse.model_validate(job) for job in jobs],
     )

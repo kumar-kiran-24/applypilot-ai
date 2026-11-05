@@ -16,13 +16,16 @@ from app.core.exceptions import DuplicateResourceError, ResourceNotFoundError
 from app.core.logging import get_logger
 from app.models.application_answer import ApplicationAnswer, VerificationStatus
 from app.models.candidate import Candidate
+from app.models.certification import Certification
 from app.models.education import Education
 from app.models.experience import Experience
 from app.models.preference import JobPreference
 from app.models.project import Project
+from app.models.user import User
 from app.repositories.candidate_repository import CandidateRepository
 from app.schemas.application_answer import ApplicationAnswerCreate, ApplicationAnswerUpdate
 from app.schemas.candidate import CandidateCreate, CandidateUpdate
+from app.schemas.certification import CertificationCreate
 from app.schemas.education import EducationCreate
 from app.schemas.experience import ExperienceCreate
 from app.schemas.preference import JobPreferenceCreate, JobPreferenceUpdate
@@ -109,6 +112,80 @@ class CandidateService:
         await self.repository.session.commit()
         logger.info("Candidate deleted", extra={"candidate_id": str(candidate_id)})
         return candidate_id
+
+    # --- Authenticated profile ----------------------------------------------
+    async def ensure_profile_for_user(self, user: User) -> Candidate:
+        """Return the profile owned by ``user``, linking or creating it once.
+
+        Candidate CRUD predates authentication, so a profile may already exist
+        under the verified Google email. Linking it is safe because the email is
+        verified by the login flow; a profile owned by another user is never
+        reused.
+        """
+        candidate = await self.repository.get_candidate_by_user_id(user.id)
+        if candidate is None:
+            existing = await self.repository.get_candidate_by_email(user.email)
+            if existing is not None and existing.user_id in (None, user.id):
+                if existing.user_id is None:
+                    existing.user_id = user.id
+                    await self.repository.session.commit()
+                candidate = existing
+            else:
+                candidate = await self.repository.create_candidate(
+                    {
+                        "user_id": user.id,
+                        "full_name": user.full_name,
+                        "email": user.email.lower(),
+                    }
+                )
+                await self.repository.session.commit()
+
+        detail = await self.repository.get_candidate_detail(candidate.id)
+        if detail is None:  # pragma: no cover - deleted concurrently
+            raise ResourceNotFoundError("Candidate profile was not found.")
+        return detail
+
+    async def update_profile_for_user(self, user: User, payload: CandidateUpdate) -> Candidate:
+        candidate = await self.ensure_profile_for_user(user)
+        values = _coerce_urls(payload.model_dump(exclude_unset=True, exclude_none=False))
+        for field in _REQUIRED_CANDIDATE_FIELDS:
+            if values.get(field) is None:
+                values.pop(field, None)
+        new_email = values.get("email")
+        if isinstance(new_email, str) and new_email != candidate.email:
+            clash = await self.repository.get_candidate_by_email(new_email)
+            if clash is not None and clash.id != candidate.id:
+                raise DuplicateResourceError(
+                    f"A candidate with email '{new_email}' already exists.",
+                    code="duplicate_email",
+                )
+
+        await self.repository.update_candidate(candidate, values)
+        await self.repository.session.commit()
+        await self.repository.session.refresh(candidate)
+        logger.info(
+            "Candidate profile updated", extra={"candidate_id": str(candidate.id)}
+        )
+        return await self.get_candidate(candidate.id)
+
+    async def add_certification_for_user(
+        self, user: User, payload: CertificationCreate
+    ) -> Certification:
+        candidate = await self.ensure_profile_for_user(user)
+        values = _coerce_urls(payload.model_dump())
+        certification = await self.repository.add_certification(candidate.id, values)
+        await self.repository.session.commit()
+        await self.repository.session.refresh(certification)
+        return certification
+
+    async def delete_certification_for_user(self, user: User, certification_id: UUID) -> UUID:
+        candidate = await self.ensure_profile_for_user(user)
+        certification = await self.repository.get_certification(certification_id)
+        if certification is None or certification.candidate_id != candidate.id:
+            raise ResourceNotFoundError("Certification was not found.")
+        await self.repository.delete_certification(certification)
+        await self.repository.session.commit()
+        return certification_id
 
     # --- Education -----------------------------------------------------------
     async def _require_candidate(self, candidate_id: UUID) -> Candidate:

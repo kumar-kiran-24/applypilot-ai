@@ -1,18 +1,25 @@
 """Google authentication endpoints.
 
-Flow: ``/google/login`` stores an OAuth state (and OIDC nonce) in the signed
-session cookie and redirects to Google; ``/google/callback`` validates that
-state, exchanges the authorization code once, verifies the Google identity and
-issues an ApplyPilot JWT.
+Flow:
+
+* ``/google/login`` stores an OAuth state (and OIDC nonce) in the signed session
+  cookie and redirects to Google.
+* ``/google/callback`` validates that state, exchanges the authorization code
+  once and verifies the Google identity. It **never** renders a token: the
+  browser is redirected to the dedicated frontend login callback with a
+  cryptographically secure, single-use code.
+* ``/login/exchange`` consumes that code atomically and returns the ApplyPilot
+  JWT to the frontend's server-side BFF (never to browser JavaScript).
 """
 
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 from authlib.integrations.base_client.errors import MismatchingStateError, OAuthError
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +30,8 @@ from app.core.logging import get_logger
 from app.core.security import create_access_token
 from app.db.session import get_db
 from app.models.user import User
+from app.schemas.auth import AuthCodeExchangeRequest
+from app.services.auth_codes import AuthCodeFailure, issue_auth_code, redeem_auth_code
 from app.services.google_oauth import (
     GOOGLE_SCOPES,
     describe_oauth_error,
@@ -35,12 +44,35 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
-SAFE_AUTH_FAILURE_DETAIL = "Google authentication was unsuccessful."
-STATE_FAILURE_DETAIL = (
-    "Google login could not be verified because the OAuth session cookie was "
-    "missing or expired. Start the login again from the same host you are "
-    "redirected back to and allow cookies for that site."
+# Short, non-sensitive identifiers passed to the frontend login callback as
+# `?error=...`. The frontend owns the user-facing copy; nothing from a provider
+# error (no description, no code, no token) is ever forwarded.
+LOGIN_ERROR_STATE = "state"
+LOGIN_ERROR_OAUTH = "oauth"
+LOGIN_ERROR_IDENTITY = "identity"
+LOGIN_ERROR_EMAIL_UNVERIFIED = "email_unverified"
+LOGIN_ERROR_ACCOUNT_EXISTS = "account_exists"
+LOGIN_ERROR_INACTIVE = "inactive"
+LOGIN_ERROR_UNAVAILABLE = "unavailable"
+
+AUTH_CODE_INVALID_DETAIL = (
+    "This sign-in link is not valid. Start again from the login page."
 )
+AUTH_CODE_EXPIRED_DETAIL = (
+    "This sign-in link has expired. Start again from the login page."
+)
+AUTH_CODE_USED_DETAIL = (
+    "This sign-in link was already used. Start again from the login page."
+)
+AUTH_CODE_ACCOUNT_DETAIL = (
+    "The ApplyPilot account for this sign-in link is unavailable."
+)
+
+_AUTH_CODE_FAILURE_DETAILS = {
+    AuthCodeFailure.invalid: AUTH_CODE_INVALID_DETAIL,
+    AuthCodeFailure.expired: AUTH_CODE_EXPIRED_DETAIL,
+    AuthCodeFailure.used: AUTH_CODE_USED_DETAIL,
+}
 
 
 def _is_email_verified(value: Any) -> bool:
@@ -59,6 +91,26 @@ def _public_user(user: User) -> dict[str, Any]:
         "full_name": user.full_name,
         "profile_picture": user.profile_picture,
     }
+
+
+def _frontend_redirect(**params: str) -> RedirectResponse:
+    """Redirect to the configured frontend callback, never to a request value.
+
+    ``AUTH_FRONTEND_REDIRECT_URI`` is validated at startup: absolute http(s),
+    no query/fragment, and its origin must be listed in
+    ``BACKEND_CORS_ORIGINS``. Only the code (or a fixed error identifier) is
+    appended, so this cannot become an open redirect.
+    """
+    target = settings.AUTH_FRONTEND_REDIRECT_URI
+    if params:
+        separator = "&" if "?" in target else "?"
+        target = f"{target}{separator}{urlencode(params)}"
+
+    response = RedirectResponse(target, status_code=status.HTTP_303_SEE_OTHER)
+    response.headers["Cache-Control"] = "no-store"
+    # The URL carries a one-time code: never leak it through a Referer header.
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 @router.get(
@@ -103,12 +155,22 @@ async def google_login(request: Request):
     return await oauth.google.authorize_redirect(request, redirect_uri)
 
 
-@router.get("/google/callback")
+@router.get(
+    "/google/callback",
+    summary="Google OAuth callback (browser navigation)",
+    description=(
+        "Validates the OAuth state from the signed session cookie, verifies the "
+        "Google identity and redirects the browser to the frontend login "
+        "callback with a single-use code. The ApplyPilot JWT is never rendered "
+        "or placed in a URL."
+    ),
+    responses={303: {"description": "Redirect to the frontend login callback"}},
+)
 async def google_callback(
     request: Request,
     db: AsyncSession = Depends(get_db),
-) -> dict[str, Any]:
-    """Validate Google's identity response and create or retrieve the user."""
+) -> RedirectResponse:
+    """Validate Google's identity response and hand a one-time code to the app."""
     try:
         token = await oauth.google.authorize_access_token(request)
     except MismatchingStateError as exc:
@@ -116,19 +178,13 @@ async def google_callback(
             "OAuth state validation failed",
             extra={"stage": "state_validation", **describe_oauth_error(exc)},
         )
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=STATE_FAILURE_DETAIL,
-        ) from None
+        return _frontend_redirect(error=LOGIN_ERROR_STATE)
     except OAuthError as exc:
         logger.warning(
             "Google OAuth token exchange failed",
             extra={"stage": "token_exchange", **describe_oauth_error(exc)},
         )
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=SAFE_AUTH_FAILURE_DETAIL,
-        ) from None
+        return _frontend_redirect(error=LOGIN_ERROR_OAUTH)
 
     logger.info("Google token exchange succeeded", extra={"stage": "token_exchange"})
 
@@ -138,10 +194,7 @@ async def google_callback(
             "Google returned no identity information",
             extra={"stage": "userinfo"},
         )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Google did not return verified identity information.",
-        )
+        return _frontend_redirect(error=LOGIN_ERROR_IDENTITY)
 
     google_sub = str(user_info.get("sub") or "").strip()
     raw_email = user_info.get("email")
@@ -152,20 +205,14 @@ async def google_callback(
             "Google identity is missing a subject or email",
             extra={"stage": "identity_validation", "has_sub": bool(google_sub)},
         )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="A verified Google account is required.",
-        )
+        return _frontend_redirect(error=LOGIN_ERROR_IDENTITY)
 
     if not email_verified:
         logger.warning(
             "Google identity has an unverified email",
             extra={"stage": "identity_validation"},
         )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="A verified Google account is required.",
-        )
+        return _frontend_redirect(error=LOGIN_ERROR_EMAIL_UNVERIFIED)
 
     email = raw_email.strip().lower()
     logger.info("Google identity validated", extra={"stage": "identity_validation"})
@@ -181,13 +228,7 @@ async def google_callback(
                 "Google login conflicts with an existing email-only account",
                 extra={"stage": "user_lookup"},
             )
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    "An account with this email already exists. "
-                    "Account linking must be completed separately."
-                ),
-            )
+            return _frontend_redirect(error=LOGIN_ERROR_ACCOUNT_EXISTS)
 
         full_name = str(user_info.get("name") or "").strip() or email
         picture = user_info.get("picture")
@@ -215,10 +256,7 @@ async def google_callback(
                 await db.execute(select(User).where(User.google_sub == google_sub))
             ).scalar_one_or_none()
             if user is None:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="Account creation conflict. Please try signing in again.",
-                ) from None
+                return _frontend_redirect(error=LOGIN_ERROR_UNAVAILABLE)
 
         logger.info(
             "User account created",
@@ -234,6 +272,74 @@ async def google_callback(
         logger.warning(
             "Inactive user rejected",
             extra={"stage": "user_lookup", "user_id": str(user.id)},
+        )
+        return _frontend_redirect(error=LOGIN_ERROR_INACTIVE)
+
+    code = await issue_auth_code(db, user.id)
+    await db.commit()
+
+    # The code is deliberately not logged (nor is the token it will yield).
+    logger.info(
+        "Login code issued to the frontend",
+        extra={"stage": "login_code", "user_id": str(user.id)},
+    )
+    return _frontend_redirect(code=code)
+
+
+@router.post(
+    "/login/exchange",
+    summary="Exchange a one-time login code for an access token",
+    description=(
+        "Consumes the single-use code issued by `/auth/google/callback` and "
+        "returns the ApplyPilot JWT. Intended for the frontend's server-side "
+        "BFF, which stores the token in the HttpOnly session cookie. A code can "
+        "be redeemed exactly once and expires within 60 seconds."
+    ),
+    responses={
+        400: {"description": "Invalid, expired or already used code"},
+        401: {"description": "The code's account is unavailable"},
+        403: {"description": "The account is inactive"},
+    },
+)
+async def exchange_login_code(
+    payload: AuthCodeExchangeRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Redeem a login code atomically and issue the ApplyPilot JWT."""
+    redemption = await redeem_auth_code(db, payload.code)
+
+    if redemption.failure is not None:
+        logger.warning(
+            "Login code rejected",
+            extra={
+                "stage": "login_code_exchange",
+                "reason": redemption.failure.value,
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_AUTH_CODE_FAILURE_DETAILS[redemption.failure],
+        )
+
+    user = (
+        await db.scalar(select(User).where(User.id == redemption.user_id))
+        if redemption.user_id is not None
+        else None
+    )
+    if user is None:
+        logger.warning(
+            "Login code referenced an unavailable account",
+            extra={"stage": "login_code_exchange"},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=AUTH_CODE_ACCOUNT_DETAIL,
+        )
+
+    if not user.is_active:
+        logger.warning(
+            "Inactive user rejected at code exchange",
+            extra={"stage": "login_code_exchange", "user_id": str(user.id)},
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

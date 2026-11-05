@@ -16,6 +16,7 @@ from sqlalchemy.orm import selectinload
 
 from app.models.application_answer import ApplicationAnswer
 from app.models.candidate import Candidate
+from app.models.certification import Certification
 from app.models.education import Education
 from app.models.experience import Experience
 from app.models.preference import JobPreference
@@ -26,6 +27,7 @@ _CANDIDATE_DETAIL_OPTIONS = (
     selectinload(Candidate.experiences),
     selectinload(Candidate.projects),
     selectinload(Candidate.preference),
+    selectinload(Candidate.certifications),
     selectinload(Candidate.application_answers),
 )
 
@@ -57,6 +59,10 @@ class CandidateRepository:
 
     async def get_candidate_by_email(self, email: str) -> Candidate | None:
         stmt = select(Candidate).where(Candidate.email == email.lower())
+        return (await self.session.execute(stmt)).scalar_one_or_none()
+
+    async def get_candidate_by_user_id(self, user_id: UUID) -> Candidate | None:
+        stmt = select(Candidate).where(Candidate.user_id == user_id)
         return (await self.session.execute(stmt)).scalar_one_or_none()
 
     async def list_candidates(self, *, limit: int = 50, offset: int = 0) -> Sequence[Candidate]:
@@ -198,3 +204,28 @@ class CandidateRepository:
             setattr(answer, field, value)
         await self.session.flush()
         return answer
+
+    # --- Certifications ------------------------------------------------------
+    async def add_certification(
+        self, candidate_id: UUID, values: Mapping[str, Any]
+    ) -> Certification:
+        certification = Certification(candidate_id=candidate_id, **dict(values))
+        self.session.add(certification)
+        await self.session.flush()
+        await self.session.refresh(certification)
+        return certification
+
+    async def get_certifications(self, candidate_id: UUID) -> Sequence[Certification]:
+        stmt = (
+            select(Certification)
+            .where(Certification.candidate_id == candidate_id)
+            .order_by(Certification.name)
+        )
+        return (await self.session.execute(stmt)).scalars().all()
+
+    async def get_certification(self, certification_id: UUID) -> Certification | None:
+        return await self.session.get(Certification, certification_id)
+
+    async def delete_certification(self, certification: Certification) -> None:
+        await self.session.delete(certification)
+        await self.session.flush()
