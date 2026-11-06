@@ -7,7 +7,7 @@ The service enforces the guarantees of Phase 2:
 * unsupported platforms never pretend to have submitted anything;
 * passwords, OTPs, MFA codes, CAPTCHA answers and session cookies are never
   read, stored or logged. When a human step is required the application moves
-  to ``manual_required`` instead.
+  to ``needs_user_action`` instead.
 """
 
 from __future__ import annotations
@@ -63,6 +63,13 @@ from app.services.application_questionnaire import (
     apply_resume_selection,
     build_questionnaire,
 )
+from app.services.application_state import (
+    EDITABLE_STATUSES,
+    PROGRESSABLE_STATUSES,
+    UNREANALYZABLE_STATUSES,
+    ApplicationStateError,
+    transition,
+)
 from app.services.candidate_service import CandidateService
 from app.services.job_service import JobService
 from app.services.matching_service import MatchingService
@@ -70,15 +77,6 @@ from app.services.resume_service import ResumeService
 from app.services.resume_storage import get_resume_storage
 
 logger = get_logger(__name__)
-
-TERMINAL_STATUSES = {ApplicationStatus.SUBMITTED}
-EDITABLE_STATUSES = {
-    ApplicationStatus.DRAFT,
-    ApplicationStatus.NEEDS_INFORMATION,
-    ApplicationStatus.READY_FOR_REVIEW,
-    ApplicationStatus.APPROVED,
-    ApplicationStatus.FAILED,
-}
 
 MANUAL_STEPS: tuple[str, ...] = (
     "Open the employer's application page in your browser.",
@@ -96,14 +94,6 @@ class ApplicationNotFoundError(ResourceNotFoundError):
 
     code = "application_not_found"
     message = "Application not found."
-
-
-class ApplicationStateError(AppError):
-    """The requested action conflicts with the application's current state."""
-
-    status_code = 409
-    code = "application_state_conflict"
-    message = "This action is not allowed for the application's current state."
 
 
 @dataclass(frozen=True)
@@ -176,8 +166,10 @@ class ApplicationService:
         )
         return list(rows.all())
 
-    async def get_application(self, user: User, application_id: UUID) -> Application:
-        application = await self.session.scalar(
+    async def get_application(
+        self, user: User, application_id: UUID, *, lock: bool = False
+    ) -> Application:
+        statement = (
             select(Application)
             .where(Application.id == application_id, Application.user_id == user.id)
             .options(
@@ -187,6 +179,10 @@ class ApplicationService:
                 selectinload(Application.candidate),
             )
         )
+        if lock:
+            # Serialises concurrent submissions of the same application.
+            statement = statement.with_for_update()
+        application = await self.session.scalar(statement)
         if application is None:
             raise ApplicationNotFoundError()
         return application
@@ -210,14 +206,45 @@ class ApplicationService:
         """Prepare (or refresh) a draft application for one owned job."""
         job = await self.jobs.get_job(user, job_id)
         existing = await self._find_for_job(user, job_id)
-        if existing is not None and existing.status in TERMINAL_STATUSES:
+        if existing is not None and existing.status in UNREANALYZABLE_STATUSES:
             raise ApplicationStateError(
-                "This application was already submitted and cannot be re-analysed."
+                "This application was already submitted or handed over for manual "
+                "submission and cannot be re-analysed. Cancel it and prepare a new "
+                "application if you need to start over.",
+                code="application_finalized",
             )
 
         profile = await self.candidates.ensure_profile_for_user(user)
         target_url = application_url or (existing.application_url if existing else job.job_url)
         adapter, detection = adapter_for_url(target_url)
+
+        if existing is None:
+            application = Application(
+                id=uuid.uuid4(),
+                user_id=user.id,
+                job_id=job.id,
+                platform=detection.platform.value,
+                platform_name=detection.display_name,
+                application_url=detection.application_url,
+                candidate_id=profile.id,
+                status=ApplicationStatus.DRAFT,
+            )
+            self.session.add(application)
+            current_questions: list[ApplicationQuestion] = []
+        else:
+            application = existing
+            application.candidate_id = profile.id
+            application.platform = detection.platform.value
+            application.platform_name = detection.display_name
+            application.application_url = detection.application_url
+            current_questions = list(existing.questions)
+
+        # Publish the analysis state before doing the work: inspection can take
+        # seconds, and an interrupted run leaves a recoverable ANALYZING row
+        # instead of a half-updated review.
+        transition(application, ApplicationStatus.ANALYZING)
+        await self.session.commit()
+
         inspection, inspection_note = await self._inspect(adapter, detection, user)
 
         resume, resume_reason, resume_score = await self._select_resume(
@@ -264,18 +291,6 @@ class ApplicationService:
                 "submitted by you through the guided workflow."
             )
 
-        if existing is None:
-            application = Application(id=uuid.uuid4(), user_id=user.id, job_id=job.id)
-            self.session.add(application)
-            current_questions: list[ApplicationQuestion] = []
-        else:
-            application = existing
-            current_questions = list(existing.questions)
-
-        application.candidate_id = profile.id
-        application.platform = detection.platform.value
-        application.platform_name = detection.display_name
-        application.application_url = detection.application_url
         application.automation_mode = mode
         application.inspection_mode = inspection.mode
         application.requires_account = bool(inspection.requires_account)
@@ -289,6 +304,9 @@ class ApplicationService:
         questions = await self._sync_questions(application, definitions, current_questions)
         self._refresh_completion(application, questions)
         await self.session.commit()
+        # Reload the collection so the caller (and the preview) sees questions
+        # created in this run even though the relationship was cached earlier.
+        await self.session.refresh(application, attribute_names=["questions"])
 
         logger.info(
             "Application prepared",
@@ -467,12 +485,13 @@ class ApplicationService:
         if application.resume_id is None and "documents.resume" not in missing:
             missing.append("documents.resume")
         application.missing_fields = sorted(set(missing))
-        if application.status in {ApplicationStatus.SUBMITTED, ApplicationStatus.MANUAL_REQUIRED}:
+        if application.status not in PROGRESSABLE_STATUSES:
             return
-        application.status = (
+        transition(
+            application,
             ApplicationStatus.READY_FOR_REVIEW
             if not application.missing_fields
-            else ApplicationStatus.NEEDS_INFORMATION
+            else ApplicationStatus.AWAITING_USER_INFORMATION,
         )
 
     # --- Answering -----------------------------------------------------------
@@ -684,7 +703,7 @@ class ApplicationService:
             },
             "ready_to_approve": ready_to_approve,
             "can_submit": bool(
-                application.status is ApplicationStatus.APPROVED
+                application.status is ApplicationStatus.AWAITING_APPROVAL
                 and application.approval_fingerprint
                 and application.approval_fingerprint
                 == approval_fingerprint(application, questions)
@@ -720,6 +739,8 @@ class ApplicationService:
         self, application: Application, missing: list[ApplicationQuestion]
     ) -> list[str]:
         warnings: list[str] = []
+        if application.status is ApplicationStatus.CANCELLED:
+            warnings.append("This application was cancelled and will not be submitted.")
         if application.requires_account:
             warnings.append(
                 "This employer may require an account. Create it yourself; ApplyPilot "
@@ -744,7 +765,11 @@ class ApplicationService:
 
     async def approve(self, user: User, application_id: UUID, *, approved: bool) -> Application:
         application = await self.get_application(user, application_id)
-        if application.status in {ApplicationStatus.SUBMITTED, ApplicationStatus.MANUAL_REQUIRED}:
+        if application.status not in {
+            ApplicationStatus.AWAITING_USER_INFORMATION,
+            ApplicationStatus.READY_FOR_REVIEW,
+            ApplicationStatus.AWAITING_APPROVAL,
+        }:
             raise ApplicationStateError("This application can no longer be approved.")
         if not approved:
             self._invalidate_approval(application)
@@ -759,14 +784,12 @@ class ApplicationService:
             )
         if application.resume_id is None:
             raise ApplicationStateError("Select a resume before approving the application.")
-        if application.status is ApplicationStatus.FAILED:
-            raise ApplicationStateError("A failed application cannot be approved.")
 
         application.approved_at = _utcnow()
         application.approval_fingerprint = approval_fingerprint(
             application, list(application.questions)
         )
-        application.status = ApplicationStatus.APPROVED
+        transition(application, ApplicationStatus.AWAITING_APPROVAL)
         await self.session.commit()
         logger.info(
             "Application approved",
@@ -780,10 +803,36 @@ class ApplicationService:
 
     # --- Submission ----------------------------------------------------------
     async def submit(self, user: User, application_id: UUID) -> SubmissionOutcome:
-        application = await self.get_application(user, application_id)
-        if application.status in {ApplicationStatus.SUBMITTED, ApplicationStatus.MANUAL_REQUIRED}:
-            raise ApplicationStateError("This application has already been processed.")
-        if application.status is not ApplicationStatus.APPROVED:
+        # Lock the row so two concurrent requests cannot both start a
+        # submission; the winner persists SUBMITTING before any browser work.
+        application = await self.get_application(user, application_id, lock=True)
+        if application.status is not ApplicationStatus.AWAITING_APPROVAL:
+            if application.status is ApplicationStatus.SUBMITTING:
+                raise ApplicationStateError(
+                    "This application is already being submitted. A retry cannot "
+                    "submit it twice.",
+                    code="submission_in_progress",
+                )
+            if application.status in {
+                ApplicationStatus.SUBMITTED,
+                ApplicationStatus.NEEDS_USER_ACTION,
+            }:
+                raise ApplicationStateError(
+                    "This application has already been processed or is awaiting "
+                    "manual action."
+                )
+            if application.status is ApplicationStatus.CANCELLED:
+                raise ApplicationStateError(
+                    "This application was cancelled and cannot be submitted. "
+                    "Prepare it again to restart.",
+                    code="application_cancelled",
+                )
+            if application.status is ApplicationStatus.FAILED:
+                raise ApplicationStateError(
+                    "The automated submission failed. Complete the application "
+                    "manually or prepare it again.",
+                    code="submission_failed",
+                )
             raise ApplicationStateError(
                 "Explicit approval is required before an application can be submitted.",
                 code="approval_required",
@@ -798,8 +847,18 @@ class ApplicationService:
                 code="approval_stale",
             )
 
+        if application.resume_id is None:
+            raise ApplicationStateError(
+                "Select a resume before submitting the application.",
+                code="resume_required",
+            )
+
         if application.automation_mode is not AutomationMode.AUTOMATED:
             return await self._finish_manual(application, reason=None)
+
+        transition(application, ApplicationStatus.SUBMITTING)
+        application.failure_reason = None
+        await self.session.commit()
 
         try:
             return await self._submit_automated(user, application)
@@ -826,7 +885,7 @@ class ApplicationService:
                     "error_class": type(exc).__name__,
                 },
             )
-            application.status = ApplicationStatus.FAILED
+            transition(application, ApplicationStatus.FAILED)
             application.failure_reason = (
                 "Automation could not complete the submission. No application was "
                 "confirmed by the employer; finish it manually."
@@ -871,7 +930,7 @@ class ApplicationService:
                 )
                 validation = await adapter.validate_application(session)
                 if not validation.valid:
-                    application.status = ApplicationStatus.FAILED
+                    transition(application, ApplicationStatus.FAILED)
                     application.failure_reason = (
                         "The employer's form reported validation errors. Review and "
                         "submit it manually."
@@ -893,7 +952,7 @@ class ApplicationService:
         if not report.submitted:
             return await self._finish_manual(application, reason=report.reason)
 
-        application.status = ApplicationStatus.SUBMITTED
+        transition(application, ApplicationStatus.SUBMITTED)
         application.stage = ApplicationStage.APPLIED
         application.submitted_at = _utcnow()
         application.submission_reference = report.reference
@@ -914,7 +973,7 @@ class ApplicationService:
     async def _finish_manual(
         self, application: Application, *, reason: str | None
     ) -> SubmissionOutcome:
-        application.status = ApplicationStatus.MANUAL_REQUIRED
+        transition(application, ApplicationStatus.NEEDS_USER_ACTION)
         application.submitted_at = None
         application.submission_reference = None
         application.stage = None
@@ -940,11 +999,14 @@ class ApplicationService:
         self, user: User, application_id: UUID, *, reference: str | None
     ) -> Application:
         application = await self.get_application(user, application_id)
-        if application.status is not ApplicationStatus.MANUAL_REQUIRED:
+        if application.status not in {
+            ApplicationStatus.NEEDS_USER_ACTION,
+            ApplicationStatus.FAILED,
+        }:
             raise ApplicationStateError(
                 "Only an application awaiting manual submission can be confirmed."
             )
-        application.status = ApplicationStatus.SUBMITTED
+        transition(application, ApplicationStatus.SUBMITTED)
         application.stage = ApplicationStage.APPLIED
         application.submitted_at = _utcnow()
         application.submission_reference = (reference or "").strip()[:255] or None
@@ -961,6 +1023,33 @@ class ApplicationService:
             )
         application.stage = stage
         await self.session.commit()
+        return await self.get_application(user, application.id)
+
+    async def cancel(self, user: User, application_id: UUID) -> Application:
+        """Cancel an unfinished application without touching the employer's site."""
+        application = await self.get_application(user, application_id)
+        if application.status is ApplicationStatus.CANCELLED:
+            return application
+        if application.status in {
+            ApplicationStatus.SUBMITTING,
+            ApplicationStatus.SUBMITTED,
+        }:
+            raise ApplicationStateError(
+                "An application that was submitted, or is being submitted, cannot be "
+                "cancelled.",
+                code="application_finalized",
+            )
+        transition(application, ApplicationStatus.CANCELLED)
+        self._invalidate_approval(application)
+        await self.session.commit()
+        logger.info(
+            "Application cancelled",
+            extra={
+                "stage": "application_cancel",
+                "user_id": str(user.id),
+                "application_id": str(application.id),
+            },
+        )
         return await self.get_application(user, application.id)
 
 

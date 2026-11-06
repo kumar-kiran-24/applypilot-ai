@@ -30,7 +30,8 @@ logged or persisted by the frontend beyond the access token described below.
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | GET | `/auth/google/login` | none | Browser redirect to Google login |
-| GET | `/auth/google/callback` | OAuth state cookie | Login callback, returns the ApplyPilot JWT |
+| GET | `/auth/google/callback` | OAuth state cookie | Login callback, redirects to the frontend with a one-time code |
+| POST | `/auth/login/exchange` | none (single-use code) | Exchange the login code for the ApplyPilot JWT |
 | GET | `/auth/me` | Bearer | Current user |
 | GET | `/gmail/connect` | Bearer + cookie | Start Gmail read-only authorization |
 | GET | `/gmail/callback` | OAuth state cookie | Finish Gmail authorization (browser navigation) |
@@ -52,7 +53,41 @@ Response: `302` redirect to `accounts.google.com`.
 Browser navigation from Google. Do not call with `fetch`: it depends on the
 HttpOnly state cookie and on the `code`/`state` query parameters added by Google.
 
-`200` response:
+It never renders a token. On success it responds `303` with an empty body and
+redirects to the configured frontend login callback
+(`AUTH_FRONTEND_REDIRECT_URI`, `http://127.0.0.1:3000/auth/callback` by default):
+
+```text
+http://127.0.0.1:3000/auth/callback?code=<single-use-code>
+```
+
+The code is random (256 bits), valid for at most 60 seconds, stored only as a
+SHA-256 hash, and redeemable exactly once.
+
+Failures redirect to the same frontend route with a fixed identifier instead of
+a JSON error, so the browser never lands on a raw API page:
+
+| `?error=` | Meaning |
+|---|---|
+| `state` | OAuth state cookie missing/expired or did not match |
+| `oauth` | Google returned an error or the token exchange failed |
+| `identity` | Google returned no usable verified identity |
+| `email_unverified` | The Google email address is not verified |
+| `account_exists` | An ApplyPilot account already uses this email |
+| `inactive` | The ApplyPilot account is inactive |
+| `unavailable` | A transient failure (e.g. concurrent account creation) |
+
+No provider error text, authorization code or token is forwarded in the URL.
+
+### `POST /auth/login/exchange`
+
+Request (no bearer token; call from trusted server-side code only):
+
+```json
+{ "code": "<code from the callback redirect>" }
+```
+
+`200` response - the same shape the callback used to render:
 
 ```json
 {
@@ -69,16 +104,15 @@ HttpOnly state cookie and on the `code`/`state` query parameters added by Google
 }
 ```
 
-Errors:
-
-| Status | `detail` |
+| Status | Meaning |
 |---|---|
-| 400 | `Google login could not be verified because the OAuth session cookie was missing or expired...` |
-| 400 | `Google authentication was unsuccessful.` |
-| 401 | `A verified Google account is required.` |
-| 401 | `Google did not return verified identity information.` |
-| 403 | `This ApplyPilot account is inactive.` |
-| 409 | `An account with this email already exists. Account linking must be completed separately.` |
+| 400 | Code is invalid, expired, or was already redeemed |
+| 401 | The code's account is unavailable |
+| 403 | The account is inactive |
+| 422 | The code does not match the expected format |
+
+The code is consumed by a single atomic `UPDATE` before the token is issued, so
+retrying a consumed code always fails. Never log the code or the returned token.
 
 ### `GET /auth/me`
 
@@ -334,10 +368,15 @@ const API = "http://127.0.0.1:8000/api/v1";
 // 1. Google login: full-page navigation, not fetch.
 window.location.assign(`${API}/auth/google/login`);
 
-// 2. After the login callback, the browser shows the JWT JSON. Store it in memory
-//    (or your chosen storage) and never log it.
-//    The current backend returns JSON from the callback; a frontend login page
-//    may read `access_token` from that response.
+// 2. The login callback redirects to AUTH_FRONTEND_REDIRECT_URI with ?code=...
+//    Exchange it once from server-side code, then store the JWT in an HttpOnly
+//    cookie. Never log the code or the token, and never put the token in a URL.
+const exchange = await fetch(`${API}/auth/login/exchange`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ code }),
+});
+const { access_token: jwt } = await exchange.json();
 
 // 3. Current user.
 const me = await fetch(`${API}/auth/me`, {

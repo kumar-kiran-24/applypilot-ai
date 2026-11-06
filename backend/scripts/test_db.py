@@ -1,8 +1,8 @@
 
 import asyncio
 
-from sqlalchemy import text
 from app.db.session import engine
+from sqlalchemy import text
 
 
 async def main():

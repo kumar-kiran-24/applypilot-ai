@@ -26,6 +26,10 @@ cryptography==46.0.3
 Authlib==1.9.1
 httpx==0.27.2
 
+# --- Resume parsing ----------------------------------------------------------
+# Pure-Python PDF text extraction; no system libraries required.
+pypdf==6.1.3
+
 # --- Configuration -----------------------------------------------------------
 python-dotenv==1.1.1
 

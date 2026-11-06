@@ -48,7 +48,8 @@ The backend currently implements the **candidate domain** end to end:
 | POST/GET | `/api/v1/candidates/{candidate_id}/answers` | Reusable answers |
 | PUT | `/api/v1/candidates/{candidate_id}/answers/{question_key}` | Update / create answer |
 | GET | `/api/v1/auth/google/login` | Start Google login |
-| GET | `/api/v1/auth/google/callback` | Google login callback (issues JWT) |
+| GET | `/api/v1/auth/google/callback` | Google login callback (redirects to the frontend with a one-time code) |
+| POST | `/api/v1/auth/login/exchange` | Exchange the one-time login code for a JWT |
 | GET | `/api/v1/auth/me` | Authenticated user |
 | GET | `/api/v1/gmail/connect` | Start Gmail read-only authorization (JWT required) |
 | GET | `/api/v1/gmail/callback` | Complete Gmail authorization |
@@ -223,6 +224,8 @@ DATABASE_URL="postgresql+asyncpg://postgres:YOUR_PASSWORD@localhost:5432/applypi
 JWT_SECRET_KEY="dev-insecure-jwt-secret-change-me"
 OAUTH_SESSION_SECRET=""
 OAUTH_SESSION_MAX_AGE_SECONDS=600
+AUTH_FRONTEND_REDIRECT_URI="http://127.0.0.1:3000/auth/callback"
+AUTH_CODE_EXPIRE_SECONDS=60
 BACKEND_CORS_ORIGINS=["http://127.0.0.1:3000"]
 
 GROQ_API_KEY=""
@@ -264,9 +267,23 @@ new one (or asking users to reconnect).
 `ENVIRONMENT=production` refuses to boot when the JWT secret is the development
 default or shorter than 32 characters, when `DEBUG=true`, when the default
 database URL is used, when CORS is `*`, when `GMAIL_TOKEN_ENCRYPTION_KEY` is
-missing, when `GMAIL_REDIRECT_URI` is missing or not `https`, or when
+missing, when `GMAIL_REDIRECT_URI` is missing or not `https`, when
 `GMAIL_FRONTEND_REDIRECT_URI` is not `https` / its origin is not listed in
-`BACKEND_CORS_ORIGINS`. Groq, Qdrant and Redis keys remain optional.
+`BACKEND_CORS_ORIGINS`, or when `AUTH_FRONTEND_REDIRECT_URI` still points at
+the local default, is not `https`, or its origin is not allow-listed. Groq,
+Qdrant and Redis keys remain optional.
+
+### Login handoff
+
+The Google login callback never renders a token. After verifying the Google
+identity the backend stores the SHA-256 hash of a 256-bit random code (60-second
+expiry, single use) and `303`-redirects the browser to
+`AUTH_FRONTEND_REDIRECT_URI` with `?code=...`. The frontend's server-side BFF
+calls `POST /api/v1/auth/login/exchange` once, receives the JWT and stores it in
+the HttpOnly `ap_session` cookie. Redemption is a single conditional `UPDATE`,
+so a code cannot be replayed; invalid, expired and reused codes return `400`
+with a safe message. The exchange endpoint is the only route that returns a JWT,
+and it is never logged, placed in a URL or returned to browser JavaScript.
 
 ### Local host contract
 

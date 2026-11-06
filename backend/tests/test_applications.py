@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from app.core.config import settings
 from app.core.security import create_access_token
+from app.models.application import Application, ApplicationStatus
 from app.models.candidate import Candidate
 from app.models.job import Job
 from app.models.resume import Resume, ResumeParsingStatus
@@ -20,6 +21,11 @@ from app.services.application_platforms import (
     normalize_application_url,
 )
 from app.services.application_questionnaire import build_questionnaire
+from app.services.application_state import (
+    ApplicationStateError,
+    can_transition,
+    transition,
+)
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -299,7 +305,7 @@ async def test_application_workflow_with_manual_submission(
     assert preview["automation_mode"] == "manual"
     assert preview["resume"]["id"] == str(resume.id)
     assert preview["resume"]["filename"] == "strong.pdf"
-    assert preview["status"] == "needs_information"
+    assert preview["status"] == "awaiting_user_information"
     assert preview["missing_required"]
     assert preview["sections"]
     documents = question_by_key(preview, "documents.resume")
@@ -347,7 +353,7 @@ async def test_application_workflow_with_manual_submission(
     )
     assert approved.status_code == 200, approved.text
     approved_preview = approved.json()
-    assert approved_preview["status"] == "approved"
+    assert approved_preview["status"] == "awaiting_approval"
     assert approved_preview["can_submit"] is True
     assert approved_preview["approved_at"]
 
@@ -378,7 +384,7 @@ async def test_application_workflow_with_manual_submission(
     assert outcome["submitted"] is False
     assert outcome["manual_required"] is True
     assert outcome["steps"]
-    assert outcome["application"]["status"] == "manual_required"
+    assert outcome["application"]["status"] == "needs_user_action"
 
     confirmed = await client.post(
         f"{APPLICATIONS}/{application_id}/mark-submitted",
@@ -479,6 +485,9 @@ async def test_resume_override_and_ownership(
             headers=bearer(other),
         )
     ).status_code == 404
+    assert (
+        await client.post(f"{APPLICATIONS}/{application_id}/cancel", headers=bearer(other))
+    ).status_code == 404
 
 
 async def test_profile_expansion_and_certifications(
@@ -532,3 +541,189 @@ async def test_profile_expansion_and_certifications(
     )
     assert deleted.status_code == 200
     assert (await client.get(PROFILE, headers=headers)).json()["certifications"] == []
+
+
+# ---------------------------------------------------------------------------
+# State machine and cancellation
+# ---------------------------------------------------------------------------
+def test_state_machine_declares_the_required_states() -> None:
+    assert {status.value for status in ApplicationStatus} == {
+        "draft",
+        "analyzing",
+        "awaiting_user_information",
+        "ready_for_review",
+        "awaiting_approval",
+        "submitting",
+        "submitted",
+        "failed",
+        "needs_user_action",
+        "cancelled",
+    }
+
+
+def test_state_machine_rejects_skipping_approval() -> None:
+    application = Application(status=ApplicationStatus.READY_FOR_REVIEW)
+
+    assert not can_transition(
+        ApplicationStatus.READY_FOR_REVIEW, ApplicationStatus.SUBMITTING
+    )
+    with pytest.raises(ApplicationStateError):
+        transition(application, ApplicationStatus.SUBMITTING)
+    assert application.status is ApplicationStatus.READY_FOR_REVIEW
+
+
+def test_state_machine_allows_submission_only_from_an_approved_state() -> None:
+    application = Application(status=ApplicationStatus.AWAITING_APPROVAL)
+
+    transition(application, ApplicationStatus.SUBMITTING)
+    assert application.status is ApplicationStatus.SUBMITTING
+
+    transition(application, ApplicationStatus.SUBMITTED)
+    assert application.status is ApplicationStatus.SUBMITTED
+
+    with pytest.raises(ApplicationStateError):
+        transition(application, ApplicationStatus.AWAITING_APPROVAL)
+
+
+async def test_cancel_unfinished_application_and_restart(
+    client: AsyncClient, session_factory: SessionFactory
+) -> None:
+    user = await create_user(session_factory)
+    job = await create_job(session_factory, user)
+    await create_resume(session_factory, user)
+    await prepare_profile(client, user)
+    headers = bearer(user)
+
+    analyzed = (
+        await client.post(
+            f"{APPLICATIONS}/analyze", json={"job_id": str(job.id)}, headers=headers
+        )
+    ).json()
+    application_id = analyzed["application_id"]
+
+    cancelled = await client.post(f"{APPLICATIONS}/{application_id}/cancel", headers=headers)
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["status"] == "cancelled"
+
+    # Cancelling twice is harmless, and a cancelled draft cannot be submitted.
+    again = await client.post(f"{APPLICATIONS}/{application_id}/cancel", headers=headers)
+    assert again.status_code == 200
+    assert again.json()["status"] == "cancelled"
+
+    blocked = await client.post(f"{APPLICATIONS}/{application_id}/submit", headers=headers)
+    assert blocked.status_code == 409
+    assert blocked.json()["code"] == "application_cancelled"
+
+    # The same stored application can be prepared again from CANCELLED.
+    restarted = await client.post(
+        f"{APPLICATIONS}/analyze", json={"job_id": str(job.id)}, headers=headers
+    )
+    assert restarted.status_code == 200, restarted.text
+    assert restarted.json()["application_id"] == application_id
+    assert restarted.json()["status"] in {"awaiting_user_information", "ready_for_review"}
+
+
+async def test_submitted_application_cannot_be_resubmitted_or_cancelled(
+    client: AsyncClient, session_factory: SessionFactory
+) -> None:
+    user = await create_user(session_factory)
+    job = await create_job(session_factory, user)
+    await create_resume(session_factory, user)
+    await prepare_profile(client, user)
+    headers = bearer(user)
+
+    preview = (
+        await client.post(
+            f"{APPLICATIONS}/analyze",
+            json={
+                "job_id": str(job.id),
+                "application_url": "https://boards.greenhouse.io/acme/jobs/1",
+            },
+            headers=headers,
+        )
+    ).json()
+    application_id = preview["application_id"]
+
+    for section in preview["sections"]:
+        for question in section["questions"]:
+            if not question["required"] or question["status"] == "confirmed":
+                continue
+            value = question["answer"] or (
+                "No" if question["question_key"] == "authorization.sponsorship" else "Yes"
+            )
+            response = await client.patch(
+                f"{APPLICATIONS}/{application_id}/questions/{question['id']}",
+                json={"answer": value, "confirmed": True},
+                headers=headers,
+            )
+            assert response.status_code == 200, response.text
+
+    approved = await client.post(
+        f"{APPLICATIONS}/{application_id}/approve",
+        json={"approved": True},
+        headers=headers,
+    )
+    assert approved.status_code == 200, approved.text
+
+    submitted = await client.post(f"{APPLICATIONS}/{application_id}/submit", headers=headers)
+    assert submitted.status_code == 200, submitted.text
+    # Automation is disabled in tests, so the user completes the submission.
+    assert submitted.json()["application"]["status"] == "needs_user_action"
+
+    confirmed = await client.post(
+        f"{APPLICATIONS}/{application_id}/mark-submitted",
+        json={"reference": "APP-1"},
+        headers=headers,
+    )
+    assert confirmed.status_code == 200, confirmed.text
+
+    # A second submit cannot reach the employer a second time.
+    duplicate = await client.post(f"{APPLICATIONS}/{application_id}/submit", headers=headers)
+    assert duplicate.status_code == 409
+    assert duplicate.json()["code"] == "application_state_conflict"
+
+    # Answers are frozen once the application was handed to the employer.
+    question_id = preview["sections"][0]["questions"][0]["id"]
+    edit = await client.patch(
+        f"{APPLICATIONS}/{application_id}/questions/{question_id}",
+        json={"answer": "Changed", "confirmed": True},
+        headers=headers,
+    )
+    assert edit.status_code == 409
+
+    assert (
+        await client.post(f"{APPLICATIONS}/{application_id}/cancel", headers=headers)
+    ).status_code == 409
+    assert (
+        await client.post(
+            f"{APPLICATIONS}/analyze", json={"job_id": str(job.id)}, headers=headers
+        )
+    ).status_code == 409
+
+
+async def test_application_being_submitted_cannot_be_submitted_again(
+    client: AsyncClient, session_factory: SessionFactory
+) -> None:
+    user = await create_user(session_factory)
+    job = await create_job(session_factory, user)
+    await create_resume(session_factory, user)
+    await prepare_profile(client, user)
+    headers = bearer(user)
+
+    analyzed = (
+        await client.post(
+            f"{APPLICATIONS}/analyze", json={"job_id": str(job.id)}, headers=headers
+        )
+    ).json()
+    application_id = uuid.UUID(analyzed["application_id"])
+
+    # Simulate a submission that is still in flight on another request.
+    async with session_factory() as session:
+        row = await session.get(Application, application_id)
+        assert row is not None
+        row.status = ApplicationStatus.SUBMITTING
+        await session.commit()
+
+    retried = await client.post(f"{APPLICATIONS}/{application_id}/submit", headers=headers)
+    assert retried.status_code == 409
+    assert retried.json()["code"] == "submission_in_progress"

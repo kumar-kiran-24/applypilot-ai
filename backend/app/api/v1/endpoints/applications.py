@@ -325,6 +325,25 @@ async def confirm_manual_submission(
     return _preview(service, application)
 
 
+@router.post(
+    "/{application_id}/cancel",
+    response_model=ApplicationPreviewResponse,
+    summary="Cancel an unfinished application",
+    description=(
+        "Marks the application cancelled without contacting the employer. An "
+        "application that was submitted, or is mid-submission, cannot be "
+        "cancelled. Cancelling twice is harmless."
+    ),
+    responses=ERROR_RESPONSES,
+)
+async def cancel_application(
+    application_id: ApplicationId, current_user: CurrentUser, db: Database
+) -> ApplicationPreviewResponse:
+    service = ApplicationService(db)
+    application = await service.cancel(current_user, application_id)
+    return _preview(service, application)
+
+
 @router.patch(
     "/{application_id}/stage",
     response_model=ApplicationPreviewResponse,

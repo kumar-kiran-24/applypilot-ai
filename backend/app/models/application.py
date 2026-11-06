@@ -51,15 +51,22 @@ def _enum_column(enum: type[Enum], name: str) -> SAEnum:
 
 
 class ApplicationStatus(str, Enum):
-    """Where an application is in the prepare -> approve -> submit flow."""
+    """Where an application is in the prepare -> approve -> submit flow.
+
+    The legal moves between these states live in
+    :mod:`app.services.application_state`; nothing changes the status directly.
+    """
 
     DRAFT = "draft"
-    NEEDS_INFORMATION = "needs_information"
+    ANALYZING = "analyzing"
+    AWAITING_USER_INFORMATION = "awaiting_user_information"
     READY_FOR_REVIEW = "ready_for_review"
-    APPROVED = "approved"
+    AWAITING_APPROVAL = "awaiting_approval"
+    SUBMITTING = "submitting"
     SUBMITTED = "submitted"
-    MANUAL_REQUIRED = "manual_required"
     FAILED = "failed"
+    NEEDS_USER_ACTION = "needs_user_action"
+    CANCELLED = "cancelled"
 
 
 class ApplicationStage(str, Enum):
