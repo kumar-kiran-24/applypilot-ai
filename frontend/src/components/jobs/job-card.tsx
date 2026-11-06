@@ -5,14 +5,20 @@ import {
   Building2,
   CalendarDays,
   ChevronDown,
+  FilePlus2,
   MapPin,
   Sparkles,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { JobMatchPanel } from "@/components/jobs/match-panel";
+import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { buttonClasses } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
+import { useAnalyzeApplication } from "@/features/applications/hooks";
+import { describeError } from "@/lib/api/errors";
 import { cn } from "@/lib/utils/cn";
 import { formatDate } from "@/lib/utils/format";
 import { safeExternalUrl } from "@/lib/utils/url";
@@ -28,9 +34,22 @@ function scoreVariant(
 
 export function JobCard({ job }: { job: Job }) {
   const url = safeExternalUrl(job.job_url);
+  const router = useRouter();
+  const analyze = useAnalyzeApplication();
   const [open, setOpen] = useState(false);
   const required = job.requirements.required_skills;
   const best = job.best_match;
+
+  const prepare = () => {
+    analyze.mutate(
+      { job_id: job.id },
+      {
+        onSuccess: (preview) => {
+          router.push(`/applications/${preview.application_id}`);
+        },
+      },
+    );
+  };
 
   return (
     <article className="group relative rounded-xl border border-white/[0.07] bg-white/[0.02] p-4 transition-colors hover:border-white/[0.14] hover:bg-white/[0.035]">
@@ -140,7 +159,37 @@ export function JobCard({ job }: { job: Job }) {
             )}
           />
         </button>
+        <button
+          type="button"
+          onClick={prepare}
+          disabled={analyze.isPending}
+          className={buttonClasses({
+            variant: "primary",
+            size: "sm",
+            className: "text-[12px]",
+          })}
+        >
+          {analyze.isPending ? (
+            <>
+              <Spinner className="h-3.5 w-3.5" />
+              Preparing…
+            </>
+          ) : (
+            <>
+              <FilePlus2 aria-hidden="true" className="h-3.5 w-3.5" />
+              Prepare application
+            </>
+          )}
+        </button>
       </div>
+
+      {analyze.error ? (
+        <div className="mt-3">
+          <Alert variant="danger" title="Could not prepare this application">
+            {describeError(analyze.error)}
+          </Alert>
+        </div>
+      ) : null}
 
       {open ? (
         <div className="mt-3">

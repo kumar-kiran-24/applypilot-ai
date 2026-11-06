@@ -53,14 +53,14 @@ export function AppShell({
         <div className="mt-4 rounded-xl border border-white/[0.07] bg-white/[0.02] p-3.5">
           <div className="flex items-center gap-2">
             <ShieldCheck aria-hidden="true" className="h-4 w-4 text-sky-300" />
-            <p className="text-[12px] font-medium text-ink">Phase 1</p>
+            <p className="text-[12px] font-medium text-ink">Phase 2B</p>
             <Badge variant="brand" className="ml-auto">
-              Read-only
+              Review first
             </Badge>
           </div>
           <p className="mt-2 text-[11px] leading-relaxed text-ink-subtle">
-            ApplyPilot never applies to a job without your explicit
-            confirmation.
+            Every answer shows its source. ApplyPilot never submits without your
+            explicit approval.
           </p>
         </div>
       </aside>
@@ -130,8 +130,8 @@ export function AppShell({
 
         <footer className="mx-auto max-w-6xl px-4 pb-8 pt-2 text-[11px] text-ink-subtle sm:px-6 lg:px-8">
           <p>
-            ApplyPilot AI · Phase 1 dashboard. Gmail access is read-only and
-            tokens are stored encrypted by the backend.
+            ApplyPilot AI · Phase 2B. Gmail access is read-only, tokens are stored
+            encrypted, and application answers always show their source.
           </p>
         </footer>
       </div>

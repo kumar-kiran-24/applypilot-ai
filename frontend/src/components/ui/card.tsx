@@ -1,13 +1,19 @@
 import { cn } from "@/lib/utils/cn";
 
 export function Card({
+  id,
   className,
   children,
 }: {
+  id?: string;
   className?: string;
   children: React.ReactNode;
 }) {
-  return <section className={cn("glass-panel", className)}>{children}</section>;
+  return (
+    <section id={id} className={cn("glass-panel", className)}>
+      {children}
+    </section>
+  );
 }
 
 export function CardHeader({

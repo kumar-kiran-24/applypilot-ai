@@ -1,7 +1,7 @@
 import { ApiError, toApiError } from "@/lib/api/errors";
 
 interface RequestOptions {
-  method?: "GET" | "POST" | "DELETE" | "PATCH";
+  method?: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
   body?: unknown;
   formData?: FormData;
   timeoutMs?: number;

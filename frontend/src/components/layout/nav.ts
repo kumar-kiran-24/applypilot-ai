@@ -6,6 +6,7 @@ import {
   Search,
   Settings,
   Sparkles,
+  UserRound,
   type LucideIcon,
 } from "lucide-react";
 
@@ -29,12 +30,18 @@ export const NAV_ITEMS: NavItem[] = [
     label: "My Applications",
     href: "/applications",
     icon: Briefcase,
-    available: false,
+    available: true,
   },
   {
     label: "Resume Manager",
     href: "/resumes",
     icon: FileText,
+    available: true,
+  },
+  {
+    label: "Candidate Profile",
+    href: "/profile",
+    icon: UserRound,
     available: true,
   },
   { label: "Gmail Integration", href: "/gmail", icon: Mail, available: true },
