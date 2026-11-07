@@ -567,6 +567,95 @@ export interface DeleteResponse {
   deleted: boolean;
 }
 
+export type MissingInformationQueueStatus = "pending" | "ready_to_complete";
+
+export type MissingInformationItemStatus =
+  | "missing"
+  | "suggested"
+  | "stale"
+  | "sensitive_confirmation"
+  | "legal_confirmation"
+  | "resolved"
+  | "dismissed";
+
+/** The matcher can attribute a suggestion to a pending confirmation. */
+export type MissingInformationAnswerSource =
+  | AnswerSource
+  | "needs_confirmation";
+
+export interface MissingInformationItem {
+  question_key: string;
+  question_text: string;
+  section: string;
+  field_type: QuestionType;
+  required: boolean;
+  status: MissingInformationItemStatus;
+  reason: string;
+  answer: string | null;
+  answer_source: MissingInformationAnswerSource | null;
+  suggested_answer: string | null;
+  suggested_source: MissingInformationAnswerSource | null;
+  confidence: number;
+  requires_confirmation: boolean;
+  is_sensitive: boolean;
+  is_legal: boolean;
+  blocks_application: boolean;
+  source_record_id: string | null;
+  last_confirmed_at: string | null;
+  options: string[];
+}
+
+export type ConflictResolution = "keep_stored" | "use_profile" | "edited";
+
+export interface MissingInformationConflict {
+  question_key: string;
+  question_text: string;
+  category: string | null;
+  stored_answer: string;
+  conflicting_answer: string;
+  conflicting_source: string;
+  reason: string;
+  resolution_options: ConflictResolution[];
+  blocks_application: boolean;
+}
+
+export interface MissingInformationSummary {
+  application_id: string;
+  job_id: string;
+  job_title: string;
+  company: string | null;
+  application_url: string;
+  application_status: ApplicationStatus;
+  queue_status: MissingInformationQueueStatus;
+  ready_to_complete: boolean;
+  required_total: number;
+  required_resolved: number;
+  required_remaining: number;
+  optional_unanswered: number;
+  stale_count: number;
+  conflict_count: number;
+  sensitive_confirmation_count: number;
+  matched_count: number;
+  progress_percent: number;
+  last_recalculated_at: string | null;
+  resolved_at: string | null;
+}
+
+export interface MissingInformationDetail extends MissingInformationSummary {
+  required_questions: MissingInformationItem[];
+  optional_questions: MissingInformationItem[];
+  matched_questions: MissingInformationItem[];
+  stale_answers: MissingInformationItem[];
+  sensitive_confirmations: MissingInformationItem[];
+  dismissed_questions: MissingInformationItem[];
+  conflicts: MissingInformationConflict[];
+}
+
+export interface MissingInformationQueueResponse {
+  total: number;
+  applications: MissingInformationSummary[];
+}
+
 /** Body of `GET /api/auth/session` (frontend BFF, not a backend route). */
 export interface SessionResponse {
   authenticated: boolean;

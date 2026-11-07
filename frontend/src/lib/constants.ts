@@ -175,6 +175,31 @@ const PROXY_ROUTES: ReadonlyArray<{
     pattern: new RegExp(`^applications/${UUID_PATTERN}/stage$`),
     route: JSON_ROUTE,
   },
+  { method: "GET", pattern: /^missing-information$/, route: JSON_ROUTE },
+  {
+    method: "GET",
+    pattern: new RegExp(`^missing-information/${UUID_PATTERN}$`),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "POST",
+    pattern: new RegExp(`^missing-information/${UUID_PATTERN}/refresh$`),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "POST",
+    pattern: new RegExp(
+      `^missing-information/${UUID_PATTERN}/questions/[a-z0-9][a-z0-9_.-]*/(answer|confirm|dismiss)$`,
+    ),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "POST",
+    pattern: new RegExp(
+      `^missing-information/${UUID_PATTERN}/conflicts/[a-z0-9][a-z0-9_.-]*/resolve$`,
+    ),
+    route: JSON_ROUTE,
+  },
   { method: "POST", pattern: /^matching\/bulk$/, route: JSON_ROUTE },
   { method: "GET", pattern: /^matching\/summary$/, route: JSON_ROUTE },
   { method: "GET", pattern: /^resumes$/, route: JSON_ROUTE },
