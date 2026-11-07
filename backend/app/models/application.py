@@ -97,8 +97,21 @@ class InspectionMode(str, Enum):
 
 
 class AnswerSource(str, Enum):
-    """Provenance of a suggested answer. Never conflate these."""
+    """Provenance of a suggested answer. Never conflate these.
 
+    The canonical Phase 2C names are declared first. The Phase 2B names remain
+    as aliases of the same members so existing stored values keep their exact
+    meaning (``verified_profile`` is persisted as ``profile``, and so on).
+    """
+
+    VERIFIED_PROFILE = "profile"
+    RESUME_SUGGESTION = "resume"
+    CONFIRMED_REUSABLE_ANSWER = "previously_approved"
+    AI_DRAFT = "ai_suggestion"
+    USER_ENTERED = "user_input"
+    NEEDS_CONFIRMATION = "needs_confirmation"
+
+    # Phase 2B aliases, kept for existing callers and stored-data semantics.
     PROFILE = "profile"
     RESUME = "resume"
     PREVIOUS_ANSWER = "previously_approved"
@@ -127,6 +140,8 @@ class QuestionType(str, Enum):
     BOOLEAN = "boolean"
     SINGLE_CHOICE = "single_choice"
     MULTI_CHOICE = "multi_choice"
+    RADIO = "radio"
+    CHECKBOX = "checkbox"
     FILE = "file"
     DECLARATION = "declaration"
 
@@ -274,6 +289,10 @@ class ApplicationQuestion(Base, TimestampMixin):
     )
     order_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Provenance detail: which profile record / reusable answer supplied this.
+    source_record_id: Mapped[str | None] = mapped_column(String(200))
+    # When the user last explicitly confirmed this answer for this application.
+    last_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # User-entered note (never a credential) e.g. "waiting on referral".
     note: Mapped[str | None] = mapped_column(Text)
 

@@ -13,11 +13,23 @@ from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+)
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
+from app.models.application import AnswerSource
 
 if TYPE_CHECKING:
     from app.models.candidate import Candidate
@@ -91,6 +103,33 @@ class ApplicationAnswer(Base, TimestampMixin):
         default=VerificationStatus.UNKNOWN,
     )
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Classification copied from the source question. Sensitive answers are
+    # prefilled but re-confirmed per application; legal answers are never
+    # stored for reuse at all.
+    is_sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_legal: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    # --- Phase 2C provenance and freshness -------------------------------
+    # Where the value came from. A stored answer is never promoted to a fact
+    # from an unverified source; resume/AI values stay suggestions.
+    answer_source: Mapped[AnswerSource] = mapped_column(
+        SAEnum(
+            AnswerSource,
+            name="answer_source",
+            native_enum=False,
+            length=32,
+            values_callable=lambda enum: [member.value for member in enum],
+        ),
+        nullable=False,
+        default=AnswerSource.USER_ENTERED,
+    )
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    # The profile row, resume or earlier answer that supplied the value.
+    source_record_id: Mapped[str | None] = mapped_column(String(200))
+    # Last time the user explicitly re-confirmed this value.
+    last_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Optional per-answer validity override, in days.
+    freshness_days: Mapped[int | None] = mapped_column(Integer)
 
     candidate: Mapped[Candidate] = relationship(back_populates="application_answers")
 

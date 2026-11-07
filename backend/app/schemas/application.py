@@ -55,6 +55,8 @@ class ApplicationQuestionResponse(BaseModel):
     answer: str | None = None
     answer_source: AnswerSource
     confidence: float
+    source_record_id: str | None = None
+    last_confirmed_at: datetime | None = None
     requires_confirmation: bool
     is_sensitive: bool
     is_legal: bool

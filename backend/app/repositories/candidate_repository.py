@@ -98,6 +98,14 @@ class CandidateRepository:
     async def get_education(self, education_id: UUID) -> Education | None:
         return await self.session.get(Education, education_id)
 
+    async def update_education(
+        self, education: Education, values: Mapping[str, Any]
+    ) -> Education:
+        for field, value in values.items():
+            setattr(education, field, value)
+        await self.session.flush()
+        return education
+
     async def delete_education(self, education: Education) -> None:
         await self.session.delete(education)
         await self.session.flush()
@@ -121,6 +129,14 @@ class CandidateRepository:
     async def get_experience(self, experience_id: UUID) -> Experience | None:
         return await self.session.get(Experience, experience_id)
 
+    async def update_experience(
+        self, experience: Experience, values: Mapping[str, Any]
+    ) -> Experience:
+        for field, value in values.items():
+            setattr(experience, field, value)
+        await self.session.flush()
+        return experience
+
     async def delete_experience(self, experience: Experience) -> None:
         await self.session.delete(experience)
         await self.session.flush()
@@ -143,6 +159,12 @@ class CandidateRepository:
 
     async def get_project(self, project_id: UUID) -> Project | None:
         return await self.session.get(Project, project_id)
+
+    async def update_project(self, project: Project, values: Mapping[str, Any]) -> Project:
+        for field, value in values.items():
+            setattr(project, field, value)
+        await self.session.flush()
+        return project
 
     async def delete_project(self, project: Project) -> None:
         await self.session.delete(project)
@@ -204,6 +226,10 @@ class CandidateRepository:
             setattr(answer, field, value)
         await self.session.flush()
         return answer
+
+    async def delete_answer(self, answer: ApplicationAnswer) -> None:
+        await self.session.delete(answer)
+        await self.session.flush()
 
     # --- Certifications ------------------------------------------------------
     async def add_certification(

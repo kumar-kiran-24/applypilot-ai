@@ -30,6 +30,12 @@ httpx==0.27.2
 # Pure-Python PDF text extraction; no system libraries required.
 pypdf==6.1.3
 
+# --- Application form detection (Phase 2E Stage B) ---------------------------
+# Reads serialized employer HTML. lxml is bundled with the environment; no
+# browser is needed for extraction or classification tests.
+beautifulsoup4==4.13.5
+lxml==6.0.2
+
 # --- Configuration -----------------------------------------------------------
 python-dotenv==1.1.1
 

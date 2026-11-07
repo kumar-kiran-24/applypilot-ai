@@ -44,8 +44,13 @@ from app.services.application_adapters import (
     SECTION_SKILLS,
     ApplicationInspection,
 )
+from app.services.application_answer_matching import (
+    ApplicationAnswerMatcher,
+    QuestionDescriptor,
+)
 
 if TYPE_CHECKING:
+    from app.models.application_answer import ApplicationAnswer
     from app.models.resume import Resume
     from app.models.user import User
 
@@ -89,6 +94,8 @@ class QuestionDefinition:
     requires_confirmation: bool = True
     status: QuestionStatus = QuestionStatus.MISSING
     field_identifier: str | None = None
+    source_record_id: str | None = None
+    last_confirmed_at: datetime | None = None
 
 
 def _definition(
@@ -242,10 +249,17 @@ CORE_QUESTIONS: tuple[QuestionDefinition, ...] = (
     _definition(
         "availability.relocation",
         "Willing to relocate?",
-        QuestionType.SINGLE_CHOICE,
+        QuestionType.RADIO,
         SECTION_AVAILABILITY,
         sensitive=True,
         options=("Yes", "No", "Negotiable"),
+    ),
+    _definition(
+        "availability.work_mode",
+        "Preferred work mode",
+        QuestionType.RADIO,
+        SECTION_AVAILABILITY,
+        options=("On-site", "Hybrid", "Remote"),
     ),
     _definition(
         "authorization.status",
@@ -392,7 +406,8 @@ def profile_answers(candidate: Candidate | None, user: User) -> dict[str, str]:
         }
         for attribute, key in mapping.items():
             if values.get(attribute):
-                values[key] = values[attribute]
+                # ``setdefault`` keeps the composed phone value built above.
+                values.setdefault(key, values[attribute])
 
         education = [
             " — ".join(part for part in (entry.degree, entry.institution) if part)
@@ -421,6 +436,9 @@ def profile_answers(candidate: Candidate | None, user: User) -> dict[str, str]:
                     values["experience.current_company"] = current.company
                 if current.designation:
                     values["experience.current_title"] = current.designation
+
+        if candidate.skills:
+            values["skills.primary"] = ", ".join(candidate.skills)
 
         projects = [
             entry.name for entry in (candidate.projects or []) if entry.name
@@ -458,6 +476,13 @@ def profile_answers(candidate: Candidate | None, user: User) -> dict[str, str]:
                     RelocationPreference.NO.value: "No",
                     RelocationPreference.NEGOTIABLE.value: "Negotiable",
                 }.get(relocation, relocation)
+            work_modes = list(preference.preferred_work_modes or [])
+            if work_modes:
+                values["availability.work_mode"] = {
+                    "onsite": "On-site",
+                    "hybrid": "Hybrid",
+                    "remote": "Remote",
+                }.get(str(work_modes[0]).casefold(), str(work_modes[0]))
 
     if not values.get("contact.email") and user.email:
         values["contact.email"] = user.email
@@ -573,16 +598,30 @@ def build_questionnaire(
     user: User,
     resume: Resume | None,
     approved_answers: dict[str, str] | None = None,
+    reusable_answers: list[ApplicationAnswer] | None = None,
+    ai_suggestions: dict[str, str] | None = None,
     inspection: ApplicationInspection | None = None,
 ) -> list[QuestionDefinition]:
-    """Return the ordered question list with sourced, confidence-scored answers."""
+    """Return the ordered question list with sourced, confidence-scored answers.
+
+    Priority is strict: verified profile, confirmed resume data, previously
+    approved answers, clearly-marked AI drafts, then an empty question the user
+    must answer. An AI draft is never treated as verified or written back to
+    the profile.
+    """
     approved_answers = {
         key: value
         for key, value in (approved_answers or {}).items()
         if _clean(value)
     }
+    ai_suggestions = {
+        key: value
+        for key, value in (ai_suggestions or {}).items()
+        if _clean(value)
+    }
     from_profile = profile_answers(candidate, user)
     from_resume = resume_answers(resume)
+    matcher = ApplicationAnswerMatcher()
 
     definitions: dict[str, QuestionDefinition] = {
         definition.question_key: definition for definition in CORE_QUESTIONS
@@ -609,29 +648,81 @@ def build_questionnaire(
         source = AnswerSource.USER_INPUT
         confidence = 0.0
         status = QuestionStatus.MISSING
+        source_record_id: str | None = None
+        last_confirmed_at: datetime | None = None
+        matched_requires_confirmation: bool | None = None
 
         if definition.question_key in from_profile:
             value = from_profile[definition.question_key]
             source = AnswerSource.PROFILE
             confidence = 0.95
             status = QuestionStatus.CONFIRMED
+            source_record_id = f"candidate:{definition.question_key}"
+            last_confirmed_at = getattr(candidate, "updated_at", None)
         elif definition.question_key in from_resume:
             value = from_resume[definition.question_key]
             source = AnswerSource.RESUME
             confidence = 0.7
             status = QuestionStatus.SUGGESTED
+            source_record_id = f"resume:{resume.id}" if resume is not None else None
         elif definition.question_key in approved_answers:
             value = approved_answers[definition.question_key]
             source = AnswerSource.PREVIOUS_ANSWER
             confidence = 1.0
             status = QuestionStatus.CONFIRMED
+            source_record_id = f"application_answer:{definition.question_key}"
+        elif definition.question_key in ai_suggestions:
+            value = ai_suggestions[definition.question_key]
+            source = AnswerSource.AI_SUGGESTION
+            confidence = 0.4
+            status = QuestionStatus.SUGGESTED
+
+        # Inspected form questions with a non-core key are matched semantically
+        # against the profile and the reusable answer bank. This is where
+        # "Mobile number" or "Highest qualification" find an existing value.
+        if value is None and definition.question_key not in _CORE_BY_KEY:
+            descriptor = QuestionDescriptor(
+                question_key=definition.question_key,
+                question_text=definition.question_text,
+                field_identifier=definition.field_identifier,
+                help_text=definition.help_text,
+                field_type=definition.field_type,
+                options=definition.options,
+                required=definition.required,
+                is_sensitive=definition.is_sensitive,
+                is_legal=definition.is_legal,
+            )
+            reusable = (
+                reusable_answers
+                if reusable_answers is not None
+                else approved_answers
+            )
+            match = matcher.match_candidate_profile(
+                descriptor, candidate, profile_values=from_profile
+            )
+            if match is None:
+                match = matcher.match_reusable_answers(descriptor, reusable)
+            if match is None:
+                match = matcher.match_resume_data(
+                    descriptor, resume, resume_values=from_resume
+                )
+            if match is not None and match.value is not None:
+                value = match.value
+                source = match.source
+                confidence = match.confidence
+                status = match.status
+                source_record_id = match.source_record_id
+                last_confirmed_at = match.last_confirmed_at
+                matched_requires_confirmation = match.requires_confirmation
 
         requires_confirmation = True
-        if source is AnswerSource.PROFILE and not definition.is_sensitive:
+        if matched_requires_confirmation is not None:
+            requires_confirmation = matched_requires_confirmation
+        elif source is AnswerSource.PROFILE and not definition.is_sensitive:
             requires_confirmation = False
-        if source is AnswerSource.PREVIOUS_ANSWER:
+        elif source is AnswerSource.PREVIOUS_ANSWER:
             # Already approved for an earlier application, so reuse is safe
-            # unless the field is a legal declaration.
+            # unless the field is a legal declaration (handled below).
             requires_confirmation = False
         if definition.is_legal or definition.question_key.startswith("declarations."):
             # Legal declarations are never pre-confirmed.
@@ -656,6 +747,8 @@ def build_questionnaire(
                 requires_confirmation=requires_confirmation,
                 status=status,
                 field_identifier=definition.field_identifier,
+                source_record_id=source_record_id,
+                last_confirmed_at=last_confirmed_at,
             )
         )
 

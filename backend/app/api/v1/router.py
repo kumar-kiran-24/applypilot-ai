@@ -7,11 +7,14 @@ from fastapi import APIRouter
 from app.api.v1.endpoints import (
     applications,
     auth,
+    auto_apply,
+    browser_sessions,
     candidates,
     gmail,
     health,
     jobs,
     matching,
+    missing_information,
     profile,
     resumes,
 )
@@ -27,5 +30,8 @@ api_router.include_router(resumes.router)
 api_router.include_router(jobs.router)
 api_router.include_router(matching.router)
 api_router.include_router(applications.router)
+api_router.include_router(missing_information.router)
+api_router.include_router(auto_apply.router)
+api_router.include_router(browser_sessions.router)
 
 __all__ = ["api_router"]

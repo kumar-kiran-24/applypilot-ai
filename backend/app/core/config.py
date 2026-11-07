@@ -105,6 +105,17 @@ class Settings(BaseSettings):
     APPLICATION_SCREENSHOT_DIR: str = "var/application-screenshots"
     # Hard cap on form fields accepted from an inspected page.
     APPLICATION_MAX_FORM_FIELDS: int = Field(default=150, ge=1, le=500)
+    # Phase 2E: a live browser session is short-lived on purpose. When it
+    # expires the user is told plainly and can reopen the employer page; the
+    # previous in-memory browser state is never presented as preserved.
+    APPLICATION_BROWSER_SESSION_TTL_SECONDS: int = Field(default=900, ge=60, le=7200)
+    # Only one live browser per user by default: a second session would let the
+    # same candidate fill two forms in parallel from one profile.
+    APPLICATION_BROWSER_MAX_ACTIVE_PER_USER: int = Field(default=1, ge=1, le=5)
+    # Extra exact origins the operator trusts for employer redirects (for
+    # example a corporate SSO domain). Environment format: comma-separated or
+    # a JSON array, e.g. "https://login.acme.com".
+    APPLICATION_BROWSER_ALLOWED_REDIRECT_ORIGINS: list[str] = Field(default_factory=list)
 
     # --- Resume storage ------------------------------------------------------
     # Files live outside the web root and outside version control. The backend
@@ -163,6 +174,19 @@ class Settings(BaseSettings):
                 return []
             if raw.startswith("["):
                 return value  # let pydantic parse the JSON array
+            return [origin.strip() for origin in raw.split(",") if origin.strip()]
+        return value
+
+    @field_validator("APPLICATION_BROWSER_ALLOWED_REDIRECT_ORIGINS", mode="before")
+    @classmethod
+    def _split_redirect_origins(cls, value: Any) -> Any:
+        """Accept a JSON array or a comma-separated list of origins."""
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            if raw.startswith("["):
+                return value
             return [origin.strip() for origin in raw.split(",") if origin.strip()]
         return value
 

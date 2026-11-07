@@ -20,7 +20,14 @@ from app.models.application_answer import (
     ApplicationAnswer,
     VerificationStatus,
 )
+from app.models.application_form_analysis import ApplicationFormAnalysis
 from app.models.auth_code import AuthCode
+from app.models.auto_apply import AutoApplyApproval, UserAutoApplySettings
+from app.models.browser_session import (
+    BrowserSession,
+    BrowserSessionState,
+    BrowserSessionStatus,
+)
 from app.models.candidate import Candidate
 from app.models.certification import Certification
 from app.models.education import Education
@@ -28,6 +35,11 @@ from app.models.experience import EmploymentType, Experience
 from app.models.gmail_connection import GmailConnection
 from app.models.job import Job
 from app.models.job_match import JobResumeMatch
+from app.models.missing_information import (
+    MissingInformationItemStatus,
+    MissingInformationQueue,
+    MissingInformationStatus,
+)
 from app.models.preference import JobPreference, RelocationPreference, WorkMode
 from app.models.project import Project
 from app.models.resume import Resume, ResumeParsingStatus
@@ -38,11 +50,16 @@ __all__ = [
     "AnswerType",
     "Application",
     "ApplicationAnswer",
+    "ApplicationFormAnalysis",
     "ApplicationQuestion",
     "ApplicationStage",
     "ApplicationStatus",
     "AuthCode",
+    "AutoApplyApproval",
     "AutomationMode",
+    "BrowserSession",
+    "BrowserSessionState",
+    "BrowserSessionStatus",
     "Candidate",
     "Certification",
     "Education",
@@ -53,6 +70,9 @@ __all__ = [
     "Job",
     "JobPreference",
     "JobResumeMatch",
+    "MissingInformationItemStatus",
+    "MissingInformationQueue",
+    "MissingInformationStatus",
     "Project",
     "QuestionStatus",
     "QuestionType",
@@ -60,6 +80,7 @@ __all__ = [
     "Resume",
     "ResumeParsingStatus",
     "User",
+    "UserAutoApplySettings",
     "VerificationStatus",
     "WorkMode",
 ]

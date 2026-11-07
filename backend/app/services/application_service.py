@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
-from app.core.exceptions import AppError, ResourceNotFoundError
+from app.core.exceptions import AppError, InvalidOperationError, ResourceNotFoundError
 from app.core.logging import get_logger
 from app.integrations.browser.playwright_driver import PlaywrightBrowser
 from app.integrations.browser.session import BrowserUnavailableError, ManualInterventionRequired
@@ -52,6 +52,7 @@ from app.models.user import User
 from app.repositories.candidate_repository import CandidateRepository
 from app.schemas.application_answer import ApplicationAnswerUpdate
 from app.schemas.candidate import CandidateUpdate
+from app.schemas.preference import JobPreferenceUpdate
 from app.services.application_adapters import (
     ApplicationPlatformAdapter,
     adapter_for_url,
@@ -70,7 +71,7 @@ from app.services.application_state import (
     ApplicationStateError,
     transition,
 )
-from app.services.candidate_service import CandidateService
+from app.services.candidate_service import CandidateService, is_forbidden_answer_storage
 from app.services.job_service import JobService
 from app.services.matching_service import MatchingService
 from app.services.resume_service import ResumeService
@@ -138,7 +139,9 @@ def _answer_type_for(field_type: QuestionType) -> AnswerType:
         QuestionType.DECLARATION: AnswerType.BOOLEAN,
         QuestionType.DATE: AnswerType.DATE,
         QuestionType.SINGLE_CHOICE: AnswerType.SINGLE_CHOICE,
+        QuestionType.RADIO: AnswerType.SINGLE_CHOICE,
         QuestionType.MULTI_CHOICE: AnswerType.MULTI_CHOICE,
+        QuestionType.CHECKBOX: AnswerType.MULTI_CHOICE,
     }.get(field_type, AnswerType.TEXT)
 
 
@@ -250,16 +253,20 @@ class ApplicationService:
         resume, resume_reason, resume_score = await self._select_resume(
             user, job, resume_id=resume_id
         )
-        approved = {
-            answer.question_key.lower(): answer.answer
+        reusable_answers = [
+            answer
             for answer in (profile.application_answers or [])
             if answer.verification_status is VerificationStatus.VERIFIED and answer.answer
+        ]
+        approved = {
+            answer.question_key.lower(): answer.answer for answer in reusable_answers
         }
         definitions = build_questionnaire(
             candidate=profile,
             user=user,
             resume=resume,
             approved_answers=approved,
+            reusable_answers=reusable_answers,
             inspection=inspection,
         )
         definitions = apply_resume_selection(
@@ -448,6 +455,7 @@ class ApplicationService:
                 question.answer_source = AnswerSource.USER_INPUT
                 question.confidence = 1.0
                 question.requires_confirmation = False
+                question.last_confirmed_at = question.last_confirmed_at or _utcnow()
                 continue
 
             question.suggested_answer = definition.answer
@@ -456,6 +464,8 @@ class ApplicationService:
             question.confidence = definition.confidence
             question.requires_confirmation = definition.requires_confirmation
             question.status = definition.status
+            question.source_record_id = definition.source_record_id
+            question.last_confirmed_at = definition.last_confirmed_at
             question.answered_at = (
                 _utcnow() if definition.status is QuestionStatus.CONFIRMED else None
             )
@@ -504,7 +514,17 @@ class ApplicationService:
         answer: str | None,
         confirmed: bool,
         note: str | None = None,
+        store_reusable: bool = True,
+        allow_sensitive_reuse: bool = True,
+        confirmed_source: AnswerSource | None = None,
     ) -> Application:
+        """Save or confirm one answer.
+
+        Phase 2C passes ``store_reusable`` and ``allow_sensitive_reuse`` so an
+        answer confirmed only for this application is not added to the
+        reusable bank, and ``confirmed_source`` so confirming a suggestion
+        keeps its provenance instead of pretending the user typed it.
+        """
         application = await self.get_application(user, application_id)
         if application.status not in EDITABLE_STATUSES:
             raise ApplicationStateError(
@@ -517,6 +537,7 @@ class ApplicationService:
             raise ResourceNotFoundError("Application question was not found.")
 
         cleaned = (answer or "").strip()
+        self._validate_answer(question, cleaned)
         if note is not None:
             question.note = note.strip()[:2000] or None
         question.answer = cleaned or None
@@ -524,11 +545,18 @@ class ApplicationService:
         if cleaned and confirmed:
             question.status = QuestionStatus.CONFIRMED
             question.requires_confirmation = False
-            question.answer_source = AnswerSource.USER_INPUT
+            question.answer_source = confirmed_source or AnswerSource.USER_INPUT
             question.confidence = 1.0
+            question.last_confirmed_at = _utcnow()
+            if confirmed_source is None:
+                question.source_record_id = None
         elif cleaned:
             question.status = QuestionStatus.SUGGESTED
             question.requires_confirmation = True
+            if cleaned != (question.suggested_answer or ""):
+                # A draft the user rewrote is their input, not the source value.
+                question.answer_source = AnswerSource.USER_INPUT
+                question.confidence = 0.5
         else:
             question.status = QuestionStatus.MISSING
             question.requires_confirmation = True
@@ -536,11 +564,90 @@ class ApplicationService:
         self._invalidate_approval(application)
         self._refresh_completion(application)
 
-        if cleaned and confirmed:
-            await self._remember_answer(user, application, question, cleaned)
+        if cleaned and confirmed and store_reusable:
+            await self._remember_answer(
+                user,
+                application,
+                question,
+                cleaned,
+                allow_sensitive_reuse=allow_sensitive_reuse,
+            )
+        elif cleaned and confirmed:
+            # The value still belongs on the profile when it is unambiguous,
+            # but it must not enter the reusable answer bank.
+            await self._persist_profile_value(
+                user, application, question.question_key, cleaned
+            )
         await self.session.commit()
         await self.session.refresh(application)
         return await self.get_application(user, application.id)
+
+    def _validate_answer(self, question: ApplicationQuestion, value: str) -> None:
+        """Reject answers that cannot be placed in the employer's field."""
+        if is_forbidden_answer_storage(question.question_key, question.question_text):
+            raise InvalidOperationError(
+                "ApplyPilot never collects passwords, one-time codes, "
+                "authentication cookies or payment details. Complete this field "
+                "yourself on the employer's site.",
+                code="forbidden_answer",
+            )
+        if not value:
+            return
+        options = [str(option) for option in (question.options or [])]
+        choice_types = {
+            QuestionType.SINGLE_CHOICE,
+            QuestionType.RADIO,
+            QuestionType.BOOLEAN,
+            QuestionType.DECLARATION,
+        }
+        if options and question.field_type in choice_types and value not in options:
+            raise InvalidOperationError(
+                f"Choose one of: {', '.join(options)}.", code="invalid_answer"
+            )
+        if options and question.field_type in {
+            QuestionType.MULTI_CHOICE,
+            QuestionType.CHECKBOX,
+        }:
+            selected = [part.strip() for part in value.split(",") if part.strip()]
+            invalid = [part for part in selected if part not in options]
+            if invalid:
+                raise InvalidOperationError(
+                    f"Choose from: {', '.join(options)}.", code="invalid_answer"
+                )
+        if question.field_type is QuestionType.NUMBER:
+            try:
+                float(value)
+            except ValueError as exc:
+                raise InvalidOperationError(
+                    "Enter a number for this question.", code="invalid_answer"
+                ) from exc
+        if question.field_type is QuestionType.DATE:
+            try:
+                date.fromisoformat(value[:10])
+            except ValueError as exc:
+                raise InvalidOperationError(
+                    "Enter a valid date (YYYY-MM-DD).", code="invalid_answer"
+                ) from exc
+        if question.field_type is QuestionType.EMAIL and "@" not in value:
+            raise InvalidOperationError(
+                "Enter a valid email address.", code="invalid_answer"
+            )
+        if question.field_type is QuestionType.URL and not value.startswith(
+            ("http://", "https://")
+        ):
+            raise InvalidOperationError(
+                "Enter a URL starting with http:// or https://.", code="invalid_answer"
+            )
+        # A declaration must be an affirmative, explicit acceptance.
+        if question.field_type is QuestionType.DECLARATION and value.casefold() not in {
+            "yes",
+            "true",
+            "i agree",
+            "accepted",
+        }:
+            raise InvalidOperationError(
+                "The declaration must be accepted explicitly.", code="invalid_answer"
+            )
 
     async def _remember_answer(
         self,
@@ -548,16 +655,32 @@ class ApplicationService:
         application: Application,
         question: ApplicationQuestion,
         value: str,
+        *,
+        allow_sensitive_reuse: bool = True,
     ) -> None:
         """Save a confirmed answer for reuse and update safe profile fields."""
         if application.candidate_id is None:
             return
-        if not question.is_legal and question.field_type is not QuestionType.FILE:
+        if (
+            not question.is_legal
+            and question.field_type is not QuestionType.FILE
+            and (allow_sensitive_reuse or not question.is_sensitive)
+            and not is_forbidden_answer_storage(
+                question.question_key, question.question_text
+            )
+        ):
             payload = ApplicationAnswerUpdate(
                 question_text=question.question_text,
                 answer=value,
                 answer_type=_answer_type_for(question.field_type),
                 verification_status=VerificationStatus.VERIFIED,
+                is_sensitive=question.is_sensitive,
+                is_legal=question.is_legal,
+                answer_source=AnswerSource.CONFIRMED_REUSABLE_ANSWER,
+                confidence=1.0,
+                source_record_id=(
+                    f"application:{application.id}:question:{question.question_key}"
+                ),
             )
             try:
                 await self.candidates.upsert_answer(
@@ -610,6 +733,26 @@ class ApplicationService:
                 updates["available_from"] = date.fromisoformat(value[:10])
             except ValueError:
                 return
+        elif key == "skills.primary":
+            skills = [
+                item.strip()
+                for item in value.replace("\n", ",").split(",")
+                if item.strip()
+            ][:100]
+            updates["skills"] = skills
+        if key == "availability.work_mode":
+            work_modes = {
+                "on-site": "onsite",
+                "onsite": "onsite",
+                "hybrid": "hybrid",
+                "remote": "remote",
+            }
+            mapped = work_modes.get(value.strip().casefold())
+            if mapped:
+                await self.candidates.update_preferences_for_user(
+                    user,
+                    JobPreferenceUpdate(preferred_work_modes=[mapped]),
+                )
         if updates:
             await self.candidates.update_profile_for_user(
                 user=user, payload=CandidateUpdate(**updates)
@@ -639,6 +782,8 @@ class ApplicationService:
             question.status = QuestionStatus.CONFIRMED
             question.requires_confirmation = False
             question.answered_at = _utcnow()
+            question.last_confirmed_at = _utcnow()
+            question.source_record_id = f"resume:{resume.id}"
 
         self._invalidate_approval(application)
         self._refresh_completion(application)
@@ -728,6 +873,8 @@ class ApplicationService:
             "answer": question.answer,
             "answer_source": question.answer_source.value,
             "confidence": question.confidence,
+            "source_record_id": question.source_record_id,
+            "last_confirmed_at": question.last_confirmed_at,
             "requires_confirmation": question.requires_confirmation,
             "is_sensitive": question.is_sensitive,
             "is_legal": question.is_legal,

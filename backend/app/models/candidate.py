@@ -6,7 +6,7 @@ import uuid
 from datetime import date
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, Date, ForeignKey, Integer, String, Text, Uuid
+from sqlalchemy import JSON, Boolean, Date, ForeignKey, Integer, String, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
@@ -51,6 +51,9 @@ class Candidate(Base, TimestampMixin):
     github_url: Mapped[str | None] = mapped_column(String(500))
     portfolio_url: Mapped[str | None] = mapped_column(String(500))
     professional_summary: Mapped[str | None] = mapped_column(Text)
+    # Verified technical skills, curated by the user. Resume skills are only a
+    # suggestion and are never copied here automatically.
+    skills: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     # Application-form facts. Work authorization and sponsorship are legally
     # sensitive and must be confirmed by the user before submission.
     work_authorization: Mapped[str | None] = mapped_column(String(200))

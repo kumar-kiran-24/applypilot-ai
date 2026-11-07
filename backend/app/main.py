@@ -24,6 +24,7 @@ from app.core.exceptions import AppError
 from app.core.logging import get_logger, setup_logging
 from app.db.init_db import check_database_connection
 from app.db.session import dispose_engine
+from app.services.browser_session_manager import shutdown_browser_sessions
 
 logger = get_logger(__name__)
 
@@ -68,6 +69,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # Never leave a Chromium process behind on shutdown or reload.
+        await shutdown_browser_sessions()
         await dispose_engine()
         logger.info("Application stopped")
 
