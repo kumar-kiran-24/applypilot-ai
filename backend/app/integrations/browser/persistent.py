@@ -23,11 +23,18 @@ is raised instead of pretending a session exists.
 from __future__ import annotations
 
 import contextlib
+import re
+import uuid
 from typing import Protocol
 from urllib.parse import urlsplit
 
 from app.core.config import Settings
 from app.core.logging import get_logger
+from app.integrations.browser.field_actions import (
+    FieldAction,
+    FieldActionKind,
+    FieldActionResult,
+)
 from app.integrations.browser.session import BrowserUnavailableError
 from app.services.application_url_security import NavigationPolicy, UnsafeNavigationError
 
@@ -54,6 +61,14 @@ class PersistentBrowserHandle(Protocol):
         """Return True while the browser and page can still be used."""
         ...
 
+    async def apply_field_action(self, action: FieldAction) -> FieldActionResult:
+        """Apply one narrow Stage C field action and report what was observed.
+
+        Implementations must refuse credential/verification controls and never
+        click a submit, apply or navigation control.
+        """
+        ...
+
     @property
     def unsafe_navigation(self) -> bool:
         """True when the page attempted to leave the approved origins."""
@@ -75,6 +90,76 @@ class PersistentBrowserDriver(Protocol):
         user_id: str,
     ) -> PersistentBrowserHandle:
         ...
+
+
+#: Controls that must never be touched by the fill engine.
+_BLOCKED_FIELD_PATTERN = re.compile(
+    r"pass|otp|one[-_\s]?time|mfa|2fa|captcha|verification[-_\s]?code|"
+    r"security[-_\s]?code|auth(?:entication)?[-_\s]?code",
+    re.IGNORECASE,
+)
+
+_FIND_TARGET_JS = """
+(args) => {
+  const [token, htmlId, name, label] = args;
+  const norm = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+  const labelFor = (el) => {
+    let text = el.getAttribute('aria-label') || '';
+    if (!text && el.id) {
+      const explicit = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+      if (explicit) text = explicit.innerText || explicit.textContent || '';
+    }
+    if (!text) {
+      const wrapper = el.closest('label');
+      if (wrapper) text = wrapper.innerText || wrapper.textContent || '';
+    }
+    if (!text) text = el.getAttribute('placeholder') || '';
+    return norm(text);
+  };
+  const nodes = Array.from(document.querySelectorAll('input, select, textarea'))
+    .filter((el) => {
+      const type = (el.getAttribute('type') || '').toLowerCase();
+      if (['hidden', 'submit', 'button', 'reset', 'image', 'password'].includes(type)) return false;
+      if (el.disabled || el.readOnly) return false;
+      const style = window.getComputedStyle(el);
+      return style.display !== 'none' && style.visibility !== 'hidden';
+    });
+  let target = null;
+  if (htmlId) target = nodes.find((el) => el.id === htmlId) || null;
+  if (!target && name) target = nodes.find((el) => el.name === name) || null;
+  if (!target && label) target = nodes.find((el) => labelFor(el) === norm(label)) || null;
+  if (!target) return null;
+  const marker = `apc-${token}`;
+  target.setAttribute('data-applypilot-target', marker);
+  return marker;
+}
+"""
+
+_MARK_OPTIONS_JS = """
+(element, args) => {
+  const [token, name] = args;
+  const norm = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+  const labelFor = (el) => {
+    let text = el.getAttribute('aria-label') || '';
+    if (!text && el.id) {
+      const explicit = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+      if (explicit) text = explicit.innerText || explicit.textContent || '';
+    }
+    if (!text) {
+      const wrapper = el.closest('label');
+      if (wrapper) text = wrapper.innerText || wrapper.textContent || '';
+    }
+    return norm(text);
+  };
+  return Array.from(document.querySelectorAll('input[type="radio"], input[type="checkbox"]'))
+    .filter((el) => !name || el.name === name)
+    .map((el, index) => {
+      const marker = `apo-${token}-${index}`;
+      el.setAttribute('data-applypilot-option', marker);
+      return { marker, label: labelFor(el), checked: el.checked === true };
+    });
+}
+"""
 
 
 class _PlaywrightHandle:
@@ -186,6 +271,257 @@ class _PlaywrightHandle:
             return bool(self._browser.is_connected())  # type: ignore[attr-defined]
         except Exception:  # pragma: no cover - browser crashed
             return False
+
+    # --- Stage C field actions ---------------------------------------------
+    async def apply_field_action(self, action: FieldAction) -> FieldActionResult:
+        """Fill, select, check or attach a file; never click or submit."""
+        page = self._page
+        if self._closed:
+            return FieldActionResult(False, action.field_id, reason="The browser is closed.")
+        descriptor = " ".join(
+            filter(None, [action.label, action.name, action.html_id, action.field_id])
+        )
+        if _BLOCKED_FIELD_PATTERN.search(descriptor):
+            return FieldActionResult(
+                False,
+                action.field_id,
+                reason="Credentials and verification fields are never touched.",
+            )
+        if self._unsafe_navigation:
+            return FieldActionResult(
+                False,
+                action.field_id,
+                reason="The page left the approved employer site.",
+            )
+
+        token = uuid.uuid4().hex[:12]
+        try:
+            marker = await page.evaluate(
+                _FIND_TARGET_JS,
+                [token, action.html_id or "", action.name or "", action.label or ""],
+            )
+        except Exception:  # pragma: no cover - closed or navigated page
+            return FieldActionResult(False, action.field_id, reason="The page changed.")
+        if not marker:
+            return FieldActionResult(
+                False,
+                action.field_id,
+                reason="The field was not found on the current page.",
+            )
+
+        locator = page.locator(f'[data-applypilot-target="{marker}"]')  # type: ignore[attr-defined]
+        if await locator.count() != 1:
+            return FieldActionResult(
+                False,
+                action.field_id,
+                reason="The field could not be located uniquely.",
+            )
+
+        try:
+            if action.kind is FieldActionKind.UPLOAD:
+                return await self._upload(locator, action)
+            if action.kind is FieldActionKind.SELECT:
+                return await self._select(locator, action, token)
+            if action.kind is FieldActionKind.CHECK:
+                return await self._check(locator, action, token)
+            return await self._fill(locator, action)
+        except Exception:  # pragma: no cover - employer page behaviour
+            logger.info(
+                "Field action could not be completed",
+                extra={"stage": "field_action", "field_kind": action.kind.value},
+            )
+            return FieldActionResult(
+                False,
+                action.field_id,
+                reason="The employer's field rejected the value.",
+            )
+
+    async def _fill(self, locator: object, action: FieldAction) -> FieldActionResult:
+        tag = await locator.evaluate("(el) => el.tagName.toLowerCase()")  # type: ignore[attr-defined]
+        input_type = (
+            await locator.get_attribute("type") or ""  # type: ignore[attr-defined]
+        ).lower()
+        text = (action.text or "").strip()
+        if not text:
+            return FieldActionResult(False, action.field_id, reason="There is no safe value.")
+        if tag in {"input", "textarea"} and input_type != "checkbox":
+            existing = await locator.input_value()  # type: ignore[attr-defined]
+            if (existing or "").strip():
+                if (existing or "").strip() == text:
+                    return FieldActionResult(True, action.field_id, observed_value=existing)
+                return FieldActionResult(
+                    False,
+                    action.field_id,
+                    observed_value=existing,
+                    reason="The field already contains a value and was not overwritten.",
+                )
+        await locator.fill(text)  # type: ignore[attr-defined]
+        observed = await locator.input_value()  # type: ignore[attr-defined]
+        return FieldActionResult(True, action.field_id, observed_value=str(observed))
+
+    async def _select(
+        self, locator: object, action: FieldAction, token: str
+    ) -> FieldActionResult:
+        options = list(action.option_labels)
+        if not options:
+            return FieldActionResult(False, action.field_id, reason="No option was chosen.")
+        wanted = options[0].strip().casefold()
+        name = await locator.get_attribute("name")  # type: ignore[attr-defined]
+        input_type = (
+            await locator.get_attribute("type") or ""  # type: ignore[attr-defined]
+        ).lower()
+
+        if input_type == "radio":
+            marked = await locator.evaluate(  # type: ignore[attr-defined]
+                _MARK_OPTIONS_JS, [token, name or ""]
+            )
+            match = next(
+                (item for item in marked if str(item.get("label")).casefold() == wanted),
+                None,
+            )
+            if match is None:
+                return FieldActionResult(
+                    False,
+                    action.field_id,
+                    reason="The chosen option is not on the current page.",
+                )
+            if match.get("checked"):
+                return FieldActionResult(
+                    True, action.field_id, observed_value=str(match.get("label"))
+                )
+            option = self._page.locator(  # type: ignore[attr-defined]
+                f'[data-applypilot-option="{match["marker"]}"]'
+            )
+            await option.check()
+            observed = next(
+                (
+                    item
+                    for item in await locator.evaluate(  # type: ignore[attr-defined]
+                        _MARK_OPTIONS_JS, [uuid.uuid4().hex[:12], name or ""]
+                    )
+                    if item.get("checked")
+                ),
+                None,
+            )
+            return FieldActionResult(
+                True,
+                action.field_id,
+                observed_value=str(observed.get("label")) if observed else None,
+            )
+
+        current = await locator.evaluate(  # type: ignore[attr-defined]
+            "(el) => el.options && el.selectedIndex >= 0 "
+            "? el.options[el.selectedIndex].textContent : ''"
+        )
+        selected_index = await locator.evaluate(  # type: ignore[attr-defined]
+            "(el) => el.options ? el.selectedIndex : -1"
+        )
+        if selected_index > 0 and str(current or "").strip():
+            if str(current).strip().casefold() == wanted:
+                return FieldActionResult(True, action.field_id, observed_value=str(current))
+            return FieldActionResult(
+                False,
+                action.field_id,
+                observed_value=str(current),
+                reason="The field already contains a value and was not overwritten.",
+            )
+        await locator.select_option(label=options[0])  # type: ignore[attr-defined]
+        observed = await locator.evaluate(  # type: ignore[attr-defined]
+            "(el) => el.options && el.selectedIndex >= 0 "
+            "? el.options[el.selectedIndex].textContent : ''"
+        )
+        return FieldActionResult(
+            True, action.field_id, observed_value=str(observed or "").strip()
+        )
+
+    async def _check(
+        self, locator: object, action: FieldAction, token: str
+    ) -> FieldActionResult:
+        name = await locator.get_attribute("name")  # type: ignore[attr-defined]
+        input_type = (
+            await locator.get_attribute("type") or ""  # type: ignore[attr-defined]
+        ).lower()
+        wanted = [item.strip().casefold() for item in action.option_labels if item.strip()]
+        if not wanted and action.text:
+            wanted = [action.text.strip().casefold()]
+
+        if input_type == "checkbox" and name:
+            marked = await locator.evaluate(  # type: ignore[attr-defined]
+                _MARK_OPTIONS_JS, [token, name]
+            )
+            if len(marked) > 1:
+                matched = [
+                    item for item in marked if str(item.get("label")).casefold() in wanted
+                ]
+                if not matched:
+                    return FieldActionResult(
+                        False,
+                        action.field_id,
+                        reason="The chosen options are not on the current page.",
+                    )
+                if all(item.get("checked") for item in matched):
+                    return FieldActionResult(
+                        True,
+                        action.field_id,
+                        observed_value=", ".join(str(item.get("label")) for item in matched),
+                    )
+                for item in matched:
+                    option = self._page.locator(  # type: ignore[attr-defined]
+                        f'[data-applypilot-option="{item["marker"]}"]'
+                    )
+                    if not item.get("checked"):
+                        await option.check()
+                observed = await locator.evaluate(  # type: ignore[attr-defined]
+                    _MARK_OPTIONS_JS, [uuid.uuid4().hex[:12], name]
+                )
+                return FieldActionResult(
+                    True,
+                    action.field_id,
+                    observed_value=", ".join(
+                        str(item.get("label")) for item in observed if item.get("checked")
+                    ),
+                )
+
+        affirmative = not wanted or wanted[0] in {"yes", "true", "1", "on"}
+        if affirmative and await locator.is_checked():  # type: ignore[attr-defined]
+            return FieldActionResult(True, action.field_id, observed_value="true")
+        if affirmative:
+            await locator.check()  # type: ignore[attr-defined]
+        else:
+            await locator.uncheck()  # type: ignore[attr-defined]
+        checked = await locator.is_checked()  # type: ignore[attr-defined]
+        return FieldActionResult(
+            True, action.field_id, observed_value="true" if checked else "false"
+        )
+
+    async def _upload(self, locator: object, action: FieldAction) -> FieldActionResult:
+        if not action.upload_path:
+            return FieldActionResult(False, action.field_id, reason="No resume was selected.")
+        input_type = (
+            await locator.get_attribute("type") or ""  # type: ignore[attr-defined]
+        ).lower()
+        if input_type != "file":
+            return FieldActionResult(
+                False,
+                action.field_id,
+                reason="The field is not a file input.",
+            )
+        existing = await locator.evaluate(  # type: ignore[attr-defined]
+            "(el) => el.files && el.files.length ? el.files[0].name : ''"
+        )
+        if existing:
+            return FieldActionResult(
+                True, action.field_id, observed_value=str(existing)
+            )
+        await locator.set_input_files(action.upload_path)  # type: ignore[attr-defined]
+        observed = await locator.evaluate(  # type: ignore[attr-defined]
+            "(el) => el.files && el.files.length ? el.files[0].name : ''"
+        )
+        return FieldActionResult(
+            bool(observed),
+            action.field_id,
+            observed_value=str(observed) if observed else None,
+        )
 
     @property
     def unsafe_navigation(self) -> bool:

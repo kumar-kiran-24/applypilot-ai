@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
+    application_fill,
     applications,
     auth,
     auto_apply,
@@ -33,5 +34,6 @@ api_router.include_router(applications.router)
 api_router.include_router(missing_information.router)
 api_router.include_router(auto_apply.router)
 api_router.include_router(browser_sessions.router)
+api_router.include_router(application_fill.router)
 
 __all__ = ["api_router"]

@@ -23,6 +23,7 @@ ignore = [
 asyncio_mode = "auto"
 markers = [
     "live: calls a real external API (skipped when credentials are absent)",
+    "browser: launches a real Chromium browser (run separately)",
 ]
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]

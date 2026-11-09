@@ -20,6 +20,10 @@ from app.models.application_answer import (
     ApplicationAnswer,
     VerificationStatus,
 )
+from app.models.application_field_execution import (
+    ApplicationFieldExecution,
+    FieldExecutionStatus,
+)
 from app.models.application_form_analysis import ApplicationFormAnalysis
 from app.models.auth_code import AuthCode
 from app.models.auto_apply import AutoApplyApproval, UserAutoApplySettings
@@ -50,6 +54,7 @@ __all__ = [
     "AnswerType",
     "Application",
     "ApplicationAnswer",
+    "ApplicationFieldExecution",
     "ApplicationFormAnalysis",
     "ApplicationQuestion",
     "ApplicationStage",
@@ -65,6 +70,7 @@ __all__ = [
     "Education",
     "EmploymentType",
     "Experience",
+    "FieldExecutionStatus",
     "GmailConnection",
     "InspectionMode",
     "Job",
