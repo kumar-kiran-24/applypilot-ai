@@ -1,10 +1,12 @@
 import {
   Briefcase,
+  ClipboardList,
   FileText,
   LayoutDashboard,
   Mail,
   Search,
   Settings,
+  ShieldCheck,
   Sparkles,
   UserRound,
   type LucideIcon,
@@ -30,6 +32,18 @@ export const NAV_ITEMS: NavItem[] = [
     label: "My Applications",
     href: "/applications",
     icon: Briefcase,
+    available: true,
+  },
+  {
+    label: "Missing Information",
+    href: "/missing-information",
+    icon: ClipboardList,
+    available: true,
+  },
+  {
+    label: "Auto-Apply",
+    href: "/auto-apply",
+    icon: ShieldCheck,
     available: true,
   },
   {

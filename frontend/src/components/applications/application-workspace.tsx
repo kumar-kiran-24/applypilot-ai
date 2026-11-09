@@ -18,6 +18,10 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
+import { ApplicationEligibilityPanel } from "@/components/auto-apply/eligibility-panel";
+import { ApplicationBrowserWorkspace } from "@/components/applications/application-browser-workspace";
+import { ApplicationFillPanel } from "@/components/applications/application-fill-panel";
+import { ApplicationHumanLoopPanel } from "@/components/applications/application-human-loop-panel";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonClasses } from "@/components/ui/button";
@@ -899,6 +903,18 @@ export function ApplicationWorkspace({ applicationId }: { applicationId: string 
           ) : null}
         </CardContent>
       </Card>
+
+      <ApplicationEligibilityPanel applicationId={applicationId} />
+
+      <ApplicationBrowserWorkspace
+        applicationId={applicationId}
+        company={preview.company}
+        applicationUrl={preview.application_url}
+      />
+
+      <ApplicationFillPanel applicationId={applicationId} />
+
+      <ApplicationHumanLoopPanel applicationId={applicationId} />
 
       <div className="grid gap-5 lg:grid-cols-[250px_minmax(0,1fr)]">
         <nav aria-label="Questionnaire sections" className="lg:sticky lg:top-24 lg:self-start">

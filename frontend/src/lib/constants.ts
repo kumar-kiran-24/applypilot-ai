@@ -200,6 +200,122 @@ const PROXY_ROUTES: ReadonlyArray<{
     ),
     route: JSON_ROUTE,
   },
+  { method: "GET", pattern: /^auto-apply\/settings$/, route: JSON_ROUTE },
+  { method: "PUT", pattern: /^auto-apply\/settings$/, route: JSON_ROUTE },
+  { method: "GET", pattern: /^auto-apply\/eligibility$/, route: JSON_ROUTE },
+  {
+    method: "GET",
+    pattern: new RegExp(`^auto-apply/eligibility/${UUID_PATTERN}$`),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "POST",
+    pattern: new RegExp(`^auto-apply/eligibility/${UUID_PATTERN}/evaluate$`),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "POST",
+    pattern: new RegExp(`^auto-apply/eligibility/${UUID_PATTERN}/approve$`),
+    route: JSON_ROUTE,
+  },
+  { method: "POST", pattern: /^browser-sessions$/, route: JSON_ROUTE },
+  { method: "GET", pattern: /^browser-sessions\/capabilities$/, route: JSON_ROUTE },
+  {
+    method: "GET",
+    pattern: new RegExp(`^browser-sessions/by-application/${UUID_PATTERN}$`),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "POST",
+    pattern: new RegExp(
+      `^browser-sessions/by-application/${UUID_PATTERN}/(pause|resume|cancel)$`,
+    ),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "POST",
+    pattern: new RegExp(
+      `^browser-sessions/by-application/${UUID_PATTERN}/view-ticket$`,
+    ),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "POST",
+    pattern: new RegExp(
+      `^browser-sessions/by-application/${UUID_PATTERN}/form-analysis$`,
+    ),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "GET",
+    pattern: new RegExp(
+      `^browser-sessions/by-application/${UUID_PATTERN}/form-analysis$`,
+    ),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "GET",
+    pattern: new RegExp(
+      `^browser-sessions/by-application/${UUID_PATTERN}/fill-plan$`,
+    ),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "POST",
+    pattern: new RegExp(
+      `^browser-sessions/by-application/${UUID_PATTERN}/fill$`,
+    ),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "GET",
+    pattern: new RegExp(
+      `^browser-sessions/by-application/${UUID_PATTERN}/fill$`,
+    ),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "POST",
+    pattern: new RegExp(
+      `^browser-sessions/by-application/${UUID_PATTERN}/fill/(pause|resume|cancel)$`,
+    ),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "GET",
+    pattern: new RegExp(
+      `^browser-sessions/by-application/${UUID_PATTERN}/interventions$`,
+    ),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "GET",
+    pattern: new RegExp(
+      `^browser-sessions/by-application/${UUID_PATTERN}/interventions/${UUID_PATTERN}$`,
+    ),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "POST",
+    pattern: new RegExp(
+      `^browser-sessions/by-application/${UUID_PATTERN}/interventions/${UUID_PATTERN}/(working|resolve|cancel)$`,
+    ),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "POST",
+    pattern: new RegExp(
+      `^browser-sessions/by-application/${UUID_PATTERN}/human-loop/(reanalyze|resume)$`,
+    ),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "GET",
+    pattern: new RegExp(
+      `^browser-sessions/by-application/${UUID_PATTERN}/final-review$`,
+    ),
+    route: JSON_ROUTE,
+  },
   { method: "POST", pattern: /^matching\/bulk$/, route: JSON_ROUTE },
   { method: "GET", pattern: /^matching\/summary$/, route: JSON_ROUTE },
   { method: "GET", pattern: /^resumes$/, route: JSON_ROUTE },

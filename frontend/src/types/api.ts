@@ -656,6 +656,432 @@ export interface MissingInformationQueueResponse {
   applications: MissingInformationSummary[];
 }
 
+export type EligibilityStatus =
+  | "eligible"
+  | "needs_information"
+  | "needs_confirmation"
+  | "needs_user_approval"
+  | "ineligible"
+  | "duplicate"
+  | "already_applied"
+  | "unsupported_platform"
+  | "failed";
+
+export type EligibilityDecision =
+  | "ready_to_prepare"
+  | "ready_for_user_review"
+  | "blocked";
+
+export type AutoApplyWorkMode = WorkMode;
+
+export interface AutoApplySettings {
+  id: string;
+  automation_enabled: boolean;
+  require_user_approval: boolean;
+  require_user_review: boolean;
+  max_applications_per_day: number;
+  minimum_resume_match_percentage: number;
+  preferred_job_titles: string[];
+  excluded_job_titles: string[];
+  preferred_companies: string[];
+  excluded_companies: string[];
+  preferred_locations: string[];
+  work_modes: WorkMode[];
+  employment_types: EmploymentType[];
+  minimum_salary: string | number | null;
+  maximum_salary: string | number | null;
+  currency: string;
+  relocation_willingness: RelocationPreference;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AutoApplySettingsInput {
+  automation_enabled?: boolean;
+  require_user_approval?: boolean;
+  require_user_review?: boolean;
+  max_applications_per_day?: number;
+  minimum_resume_match_percentage?: number;
+  preferred_job_titles?: string[];
+  excluded_job_titles?: string[];
+  preferred_companies?: string[];
+  excluded_companies?: string[];
+  preferred_locations?: string[];
+  work_modes?: WorkMode[];
+  employment_types?: EmploymentType[];
+  minimum_salary?: string | number | null;
+  maximum_salary?: string | number | null;
+  currency?: string;
+  relocation_willingness?: RelocationPreference;
+}
+
+export interface EligibilityCheck {
+  name: string;
+  label: string;
+  status: EligibilityStatus;
+  explanation: string;
+  blocking: boolean;
+  source: string;
+  suggested_resolution: string;
+  details: Record<string, unknown>;
+}
+
+export interface EligibilityApproval {
+  approved: boolean;
+  current: boolean;
+  approved_at: string | null;
+  approved_by_user_id: string | null;
+  report_version: string | null;
+  report_decision: string | null;
+}
+
+export interface EligibilityReport {
+  application_id: string;
+  job_id: string;
+  job_title: string;
+  company: string | null;
+  platform: string;
+  platform_name: string;
+  application_url: string;
+  application_status: ApplicationStatus;
+  resume_selected: boolean;
+  resume_id: string | null;
+  resume_filename: string | null;
+  resume_match_score: number | null;
+  overall_decision: EligibilityDecision;
+  readiness_percentage: number;
+  message: string;
+  blocking_issues: EligibilityCheck[];
+  warnings: EligibilityCheck[];
+  required_user_actions: string[];
+  passed_checks: EligibilityCheck[];
+  failed_checks: EligibilityCheck[];
+  checks: EligibilityCheck[];
+  automation_enabled: boolean;
+  require_user_approval: boolean;
+  require_user_review: boolean;
+  approval: EligibilityApproval;
+  evaluation_timestamp: string;
+  report_version: string;
+}
+
+export interface EligibilitySummary {
+  application_id: string;
+  job_id: string;
+  job_title: string;
+  company: string | null;
+  application_status: ApplicationStatus;
+  platform_name: string;
+  resume_filename: string | null;
+  resume_match_score: number | null;
+  overall_decision: EligibilityDecision;
+  readiness_percentage: number;
+  blocking_count: number;
+  warning_count: number;
+  blocking_issue_names: string[];
+  next_action: string | null;
+  automation_enabled: boolean;
+  approved: boolean;
+  evaluation_timestamp: string;
+  report_version: string;
+}
+
+export interface EligibilityOverview {
+  total: number;
+  ready_to_prepare: number;
+  ready_for_user_review: number;
+  blocked: number;
+  needs_information: number;
+  needs_confirmation: number;
+  needs_user_approval: number;
+  ineligible: number;
+  duplicate: number;
+  already_applied: number;
+  unsupported_platform: number;
+  failed: number;
+  automation_enabled: boolean;
+}
+
+export interface EligibilityListResponse {
+  overview: EligibilityOverview;
+  applications: EligibilitySummary[];
+}
+
+export type FillFieldStatus =
+  | "ready"
+  | "needs_confirmation"
+  | "needs_human_input"
+  | "already_filled"
+  | "skipped"
+  | "succeeded"
+  | "failed"
+  | "pending_confirmation"
+  | "pending_human_input";
+
+export type FillAction = "fill" | "select" | "check" | "upload" | "none";
+
+export interface FillResumeSelection {
+  resume_id: string | null;
+  filename: string | null;
+  will_upload: boolean;
+  file_field_ids: string[];
+  reason: string;
+}
+
+export interface FillPlanField {
+  field_id: string;
+  label: string;
+  field_type: string;
+  classification: string;
+  required: boolean;
+  action: FillAction;
+  status: FillFieldStatus;
+  proposed_value: string | null;
+  source: string;
+  confidence: number;
+  options: string[];
+  reason: string;
+}
+
+export interface FillPlanResponse {
+  application_id: string;
+  analysis_id: string;
+  analysis_version: number;
+  browser_session_id: string;
+  generated_at: string;
+  total_fields: number;
+  eligible_count: number;
+  confirmation_count: number;
+  human_input_count: number;
+  already_filled_count: number;
+  skipped_count: number;
+  resume: FillResumeSelection;
+  fields: FillPlanField[];
+  warnings: string[];
+  executable: boolean;
+  final_submission_note: string;
+}
+
+export interface FillFieldResult {
+  field_id: string;
+  label: string;
+  action: FillAction;
+  status: FillFieldStatus;
+  verified: boolean;
+  reason: string;
+  source: string;
+}
+
+export type InterventionType =
+  | "missing_information"
+  | "user_confirmation"
+  | "stale_information"
+  | "conflicting_information"
+  | "sensitive_information"
+  | "unsupported_field"
+  | "browser_session_expired"
+  | "form_changed";
+
+export type InterventionStatus =
+  | "pending"
+  | "user_working"
+  | "resolved"
+  | "cancelled"
+  | "expired";
+
+export interface Intervention {
+  intervention_id: string;
+  application_id: string;
+  browser_session_id: string | null;
+  execution_id: string | null;
+  analysis_id: string | null;
+  analysis_version: number | null;
+  field_id: string | null;
+  field_label: string;
+  field_category: string;
+  required: boolean;
+  reason: string;
+  intervention_type: InterventionType;
+  status: InterventionStatus;
+  resolution_reason: string | null;
+  created_at: string;
+  updated_at: string;
+  user_working_at: string | null;
+  resolved_at: string | null;
+  cancelled_at: string | null;
+  expired_at: string | null;
+}
+
+export interface BrowserViewInfo {
+  available: boolean;
+  mode: string;
+  user_can_interact: boolean;
+  reason: string;
+  required_component: string | null;
+}
+
+export interface BrowserSession {
+  session_id: string;
+  application_id: string;
+  job_id: string | null;
+  job_title: string;
+  company: string | null;
+  application_url: string;
+  run_number: number;
+  state: string;
+  browser_status: string;
+  current_url: string | null;
+  allowed_origins: string[];
+  pause_reason: string | null;
+  failure_code: string | null;
+  failure_reason: string | null;
+  checkpoint: Record<string, unknown>;
+  active: boolean;
+  can_pause: boolean;
+  can_resume: boolean;
+  can_cancel: boolean;
+  started_at: string | null;
+  last_activity_at: string | null;
+  expires_at: string | null;
+  stopped_at: string | null;
+  view: BrowserViewInfo;
+}
+
+export interface BrowserSessionCapabilitiesResponse {
+  view: BrowserViewInfo;
+  automation_enabled: boolean;
+  session_ttl_seconds: number;
+  final_submission_note: string;
+}
+
+export interface BrowserViewTicketResponse {
+  browser_session_id: string;
+  ticket: string;
+  websocket_path: string;
+  expires_at: string;
+  mode: string;
+  frame_format: string;
+  can_interact: boolean;
+  note: string;
+}
+
+export interface InterventionListResponse {
+  application_id: string;
+  application_url: string;
+  browser_session_id: string | null;
+  view: BrowserViewInfo;
+  total: number;
+  pending_count: number;
+  user_working_count: number;
+  blocking_count: number;
+  interventions: Intervention[];
+  final_submission_note: string;
+}
+
+export interface FormFieldChange {
+  change: "added" | "removed" | "changed";
+  field_id: string | null;
+  label: string;
+  previous_label: string | null;
+  field_type: string | null;
+  previous_field_type: string | null;
+  required: boolean | null;
+  previous_required: boolean | null;
+  options_changed: boolean;
+  now_has_value: boolean;
+  previously_had_value: boolean;
+}
+
+export interface HumanLoopReconcileResponse {
+  application_id: string;
+  analysis_id: string;
+  analysis_version: number;
+  previous_analysis_id: string | null;
+  previous_analysis_version: number | null;
+  page_url: string | null;
+  field_count: number;
+  changes: FormFieldChange[];
+  newly_completed_fields: string[];
+  blocked_count: number;
+  interventions: Intervention[];
+  execution: FillExecutionResponse | null;
+  view: BrowserViewInfo;
+  manual_handoff_required: boolean;
+  verification_note: string;
+  final_submission_note: string;
+}
+
+export interface ReviewItem {
+  label: string;
+  present: boolean;
+  optional: boolean;
+  detail: string | null;
+}
+
+export interface ReviewSection {
+  key: string;
+  label: string;
+  status: string;
+  items: ReviewItem[];
+}
+
+export interface FinalReviewResponse {
+  application_id: string;
+  execution_id: string | null;
+  execution_status: string;
+  analysis_version: number | null;
+  ready_for_final_review: boolean;
+  generated_at: string;
+  resume: FillResumeSelection;
+  sections: ReviewSection[];
+  filled_field_labels: string[];
+  verified_field_labels: string[];
+  skipped_field_labels: string[];
+  confirmation_fields: string[];
+  blocking_interventions: string[];
+  missing_optional_fields: string[];
+  filled_count: number;
+  verified_count: number;
+  skipped_count: number;
+  blocker_count: number;
+  view: BrowserViewInfo;
+  manual_submission_required: boolean;
+  final_submission_note: string;
+}
+
+export interface FillExecutionResponse {
+  execution_id: string;
+  application_id: string;
+  analysis_id: string;
+  analysis_version: number;
+  browser_session_id: string;
+  run_number: number;
+  status: string;
+  total_fields: number;
+  ready_count: number;
+  succeeded_count: number;
+  failed_count: number;
+  skipped_count: number;
+  verified_count: number;
+  pending_confirmation_count: number;
+  pending_human_input_count: number;
+  selected_resume_id: string | null;
+  selected_resume_filename: string | null;
+  results: FillFieldResult[];
+  warnings: string[];
+  pause_reason: string | null;
+  failure_code: string | null;
+  failure_reason: string | null;
+  can_pause: boolean;
+  can_resume: boolean;
+  can_cancel: boolean;
+  started_at: string | null;
+  paused_at: string | null;
+  completed_at: string | null;
+  last_activity_at: string | null;
+  final_submission_note: string;
+}
+
 /** Body of `GET /api/auth/session` (frontend BFF, not a backend route). */
 export interface SessionResponse {
   authenticated: boolean;
