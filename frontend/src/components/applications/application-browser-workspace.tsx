@@ -37,6 +37,7 @@ import {
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { EmployerApplicationUrlForm } from "@/components/applications/employer-application-url-form";
 import {
   useBrowserCapabilities,
   useBrowserSession,
@@ -65,6 +66,12 @@ import type { BrowserViewInfo } from "@/types/api";
 
 type ViewState = "idle" | "connecting" | "live" | "closed" | "error";
 
+/** A precise reason the live view is not showing frames. */
+interface ViewDiagnostic {
+  title: string;
+  detail: string;
+}
+
 const EXECUTION_STATUS: Record<string, string> = {
   planned: "Planned",
   running: "Filling safely",
@@ -79,7 +86,13 @@ const EXECUTION_STATUS: Record<string, string> = {
 };
 
 function websocketUrl(path: string, ticket: string): string {
-  const base = new URL(apiBaseUrl());
+  const configured = apiBaseUrl();
+  // NEXT_PUBLIC_API_BASE_URL may be absolute (http://host:8000/api/v1) or a
+  // same-origin path (/api/v1). Resolve relative bases against the page origin
+  // so the WebSocket always connects to an absolute ws(s):// URL.
+  const base = /^https?:\/\//i.test(configured)
+    ? new URL(configured)
+    : new URL(configured || "/", window.location.origin);
   const origin = `${base.protocol === "https:" ? "wss:" : "ws:"}//${base.host}`;
   const suffix = path.startsWith("/") ? path : `/${path}`;
   return `${origin}${suffix}?ticket=${encodeURIComponent(ticket)}`;
@@ -141,11 +154,11 @@ function CapabilityNote({ view }: { view: BrowserViewInfo }) {
     );
   }
   return (
-    <Alert variant="info" title="Live browser view is unavailable">
+    <Alert variant="info" title="Live browser view is disabled on this deployment">
       {view.reason}
       {view.required_component ? (
         <span className="mt-1 block text-ink-subtle">
-          Required component: {view.required_component}.
+          Required setting: {view.required_component}.
         </span>
       ) : null}
     </Alert>
@@ -156,10 +169,18 @@ export function ApplicationBrowserWorkspace({
   applicationId,
   company,
   applicationUrl,
+  jobListingUrl = null,
+  employerCareersUrl = null,
+  applicationUrlIsJobBoard = false,
+  suggestedApplicationUrl = null,
 }: {
   applicationId: string;
   company: string | null;
   applicationUrl: string;
+  jobListingUrl?: string | null;
+  employerCareersUrl?: string | null;
+  applicationUrlIsJobBoard?: boolean;
+  suggestedApplicationUrl?: string | null;
 }) {
   const queryClient = useQueryClient();
   const capabilities = useBrowserCapabilities();
@@ -182,16 +203,35 @@ export function ApplicationBrowserWorkspace({
   const [viewport, setViewport] = useState({ width: 1280, height: 900 });
   const [notice, setNotice] = useState<string | null>(null);
   const [inputNotice, setInputNotice] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [diagnostic, setDiagnostic] = useState<ViewDiagnostic | null>(null);
   const [endConfirm, setEndConfirm] = useState(false);
 
   const socketRef = useRef<WebSocket | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const lastMoveRef = useRef(0);
+  // Mutable mirrors let WebSocket callbacks read the current phase without
+  // being re-bound on every render.
+  const stateRef = useRef<ViewState>("idle");
+  const frameSeenRef = useRef(false);
+  const serverClosedRef = useRef(false);
+  const frameTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const setViewState = (next: ViewState) => {
+    stateRef.current = next;
+    setState(next);
+  };
+
+  const clearFrameTimer = () => {
+    if (frameTimerRef.current !== null) {
+      clearTimeout(frameTimerRef.current);
+      frameTimerRef.current = null;
+    }
+  };
 
   useEffect(() => {
     return () => {
+      clearFrameTimer();
       socketRef.current?.close();
       socketRef.current = null;
     };
@@ -234,18 +274,52 @@ export function ApplicationBrowserWorkspace({
   }, [state, viewport.width, viewport.height]);
 
   const disconnect = (next: ViewState = "idle") => {
+    clearFrameTimer();
     socketRef.current?.close();
     socketRef.current = null;
-    setState(next);
+    setViewState(next);
     setFrame(null);
+    frameSeenRef.current = false;
     setNotice(null);
     setInputNotice(null);
+    setDiagnostic(null);
   };
 
   const connectSocket = (path: string, viewTicket: string) => {
     socketRef.current?.close();
-    const socket = new WebSocket(websocketUrl(path, viewTicket));
+    clearFrameTimer();
+    frameSeenRef.current = false;
+    serverClosedRef.current = false;
+    setFrame(null);
+    setNotice(null);
+    setInputNotice(null);
+    setDiagnostic(null);
+    setViewState("connecting");
+
+    let socket: WebSocket;
+    try {
+      socket = new WebSocket(websocketUrl(path, viewTicket));
+    } catch (cause) {
+      setViewState("error");
+      setDiagnostic({
+        title: "Live view connection could not be opened",
+        detail: `The WebSocket URL could not be built. ${describeError(cause)}`,
+      });
+      return;
+    }
     socketRef.current = socket;
+
+    const armFirstFrameWatchdog = () => {
+      clearFrameTimer();
+      frameTimerRef.current = setTimeout(() => {
+        if (frameSeenRef.current || stateRef.current !== "live") return;
+        setDiagnostic({
+          title: "Connected, but no frames have arrived",
+          detail:
+            "The WebSocket is open and the browser session is attached, but the page has not produced a frame yet. Wait a moment, then reconnect if it stays blank.",
+        });
+      }, 8_000);
+    };
 
     socket.onmessage = (event) => {
       let message: Record<string, unknown>;
@@ -261,10 +335,12 @@ export function ApplicationBrowserWorkspace({
           if (Number.isFinite(width) && Number.isFinite(height)) {
             setViewport({ width, height });
           }
-          setState("live");
+          setDiagnostic(null);
+          setViewState("live");
           setNotice(
             typeof message.note === "string" ? message.note : null,
           );
+          armFirstFrameWatchdog();
           break;
         }
         case "frame": {
@@ -274,6 +350,10 @@ export function ApplicationBrowserWorkspace({
           if (Number.isFinite(width) && Number.isFinite(height)) {
             setViewport({ width, height });
           }
+          frameSeenRef.current = true;
+          clearFrameTimer();
+          setDiagnostic(null);
+          setViewState("live");
           setFrame(`data:image/jpeg;base64,${message.data}`);
           break;
         }
@@ -301,7 +381,10 @@ export function ApplicationBrowserWorkspace({
           break;
         }
         case "session_closed": {
-          setState("closed");
+          serverClosedRef.current = true;
+          clearFrameTimer();
+          setDiagnostic(null);
+          setViewState("closed");
           setNotice(
             typeof message.message === "string" ? message.message : null,
           );
@@ -313,56 +396,145 @@ export function ApplicationBrowserWorkspace({
     };
 
     socket.onerror = () => {
-      setState("error");
-      setError("The live browser connection could not be established.");
+      // A close event always follows; keep the state machine in one place to
+      // avoid reporting "closed" as a successful disconnect.
+      setDiagnostic({
+        title: "Live view connection failed",
+        detail: "The WebSocket could not reach the ApplyPilot API.",
+      });
     };
 
     socket.onclose = (event) => {
       if (socketRef.current !== socket) return;
       socketRef.current = null;
-      setState((current) => (current === "live" ? "closed" : current));
+      clearFrameTimer();
+
+      if (serverClosedRef.current) {
+        setViewState("closed");
+        return;
+      }
+
+      if (event.code === 4401) {
+        setViewState("error");
+        setDiagnostic({
+          title: "The live-view ticket was rejected",
+          detail:
+            "The one-time ticket expired or was already used. Reconnect to request a new ticket.",
+        });
+        return;
+      }
+      if (event.code === 4403) {
+        setViewState("error");
+        setDiagnostic({
+          title: "This origin is not allowed to view the browser",
+          detail:
+            "The backend rejected the WebSocket Origin. Add this frontend origin to BACKEND_CORS_ORIGINS on the backend.",
+        });
+        return;
+      }
       if (event.code === 4404) {
+        setViewState("closed");
         setNotice(
           "The browser session expired or was cancelled. Start it again to reopen the employer's page.",
         );
-      } else if (event.code === 4409) {
-        setNotice(
-          "Another live view is already attached to this browser session.",
-        );
-      } else if (event.code === 4401) {
-        setNotice(
-          "The view ticket expired or was already used. Reconnect to get a new one.",
-        );
-      } else if (event.code === 4403) {
-        setError("This browser view is not allowed from this origin.");
+        return;
       }
+      if (event.code === 4409) {
+        setViewState("error");
+        setDiagnostic({
+          title: "Another live view is already attached",
+          detail:
+            "Only one view can attach to a browser session. Close the other tab or wait for it to release the view, then reconnect.",
+        });
+        return;
+      }
+      if (
+        stateRef.current === "live" &&
+        (event.code === 1000 || event.code === 1001 || event.code === 4408)
+      ) {
+        setViewState("closed");
+        setNotice(
+          event.reason
+            ? `The live view closed: ${event.reason.replaceAll("_", " ")}.`
+            : "The live view closed. Reconnect to attach to the browser session again.",
+        );
+        return;
+      }
+      setViewState("error");
+      setDiagnostic({
+        title: "Live view connection failed",
+        detail: `The WebSocket closed with code ${event.code}${
+          event.reason ? ` (${event.reason.replaceAll("_", " ")})` : ""
+        }. Check that the backend is running, that NEXT_PUBLIC_API_BASE_URL is correct, and that the Nginx WebSocket proxy is configured.`,
+      });
     };
   };
 
   const openWorkspace = async () => {
-    if (!capabilities.data?.view.available) return;
     setOpen(true);
-    setState("connecting");
-    setError(null);
     setInputNotice(null);
+    setNotice(null);
+    setDiagnostic(null);
     setEndConfirm(false);
+
+    // Saving the employer URL can retry immediately, before the capability
+    // query has finished on a first render. Read the authoritative result
+    // instead of deciding from a possibly-empty cache.
+    let view = capabilities.data?.view;
+    if (!view) {
+      const refreshed = await capabilities.refetch();
+      view = refreshed.data?.view;
+    }
+    if (!view?.available) {
+      setViewState("error");
+      setDiagnostic({
+        title: "Live browser view is disabled on this deployment",
+        detail:
+          view?.reason ??
+          "Browser streaming has not been enabled on the backend.",
+      });
+      return;
+    }
+
+    setViewState("connecting");
+    let current: Awaited<ReturnType<typeof startSession.mutateAsync>>;
     try {
       // Idempotent: returns the existing live browser or opens the page once.
-      const current = await startSession.mutateAsync();
-      // A paused browser is still live and viewable; only a closed/expired
-      // session cannot be attached.
-      if (current.browser_status !== "open") {
-        throw new Error(
-          current.failure_reason ??
-            "The browser session is not live. Start it again.",
-        );
-      }
-      const issued = await ticket.mutateAsync();
-      connectSocket(issued.websocket_path, issued.ticket);
+      current = await startSession.mutateAsync();
     } catch (cause) {
-      setState("error");
-      setError(describeError(cause));
+      setViewState("error");
+      setDiagnostic({
+        title: "The browser session could not be started",
+        detail: describeError(cause),
+      });
+      return;
     }
+
+    // A paused browser is still live and viewable; only a closed/expired
+    // session cannot be attached.
+    if (current.browser_status !== "open") {
+      setViewState("error");
+      setDiagnostic({
+        title: "No live browser is attached to this application",
+        detail:
+          current.failure_reason ??
+          "The browser session is not open. Start it again, then reopen the live view.",
+      });
+      return;
+    }
+
+    let issued: Awaited<ReturnType<typeof ticket.mutateAsync>>;
+    try {
+      issued = await ticket.mutateAsync();
+    } catch (cause) {
+      setViewState("error");
+      setDiagnostic({
+        title: "The live-view ticket could not be issued",
+        detail: describeError(cause),
+      });
+      return;
+    }
+    connectSocket(issued.websocket_path, issued.ticket);
   };
 
   const imagePoint = (event: {
@@ -443,7 +615,7 @@ export function ApplicationBrowserWorkspace({
   const externalUrl = safeExternalUrl(applicationUrl);
 
   return (
-    <Card>
+    <Card id="live-browser-workspace">
       <CardHeader>
         <div>
           <CardTitle className="flex items-center gap-2">
@@ -471,6 +643,32 @@ export function ApplicationBrowserWorkspace({
           <Alert variant="danger" title="Could not read browser capabilities">
             {describeError(capabilities.error)}
           </Alert>
+        ) : null}
+
+        {applicationUrlIsJobBoard ? (
+          <div className="space-y-2 rounded-xl border border-amber-400/25 bg-amber-500/[0.05] p-3">
+            <p className="text-[12px] font-medium text-amber-100">
+              This application still points at a job listing
+            </p>
+            <p className="text-[11px] leading-relaxed text-amber-100/70">
+              A browser session can only open the employer&apos;s actual
+              application form. Paste that URL below; saving it validates the
+              public destination, refreshes the application and immediately
+              retries the browser session.
+            </p>
+            <EmployerApplicationUrlForm
+              applicationId={applicationId}
+              initialApplicationUrl={applicationUrl}
+              jobListingUrl={jobListingUrl}
+              employerCareersUrl={employerCareersUrl}
+              suggestedApplicationUrl={suggestedApplicationUrl}
+              isJobBoard
+              submitLabel="Save URL and retry browser"
+              onSaved={() => {
+                void openWorkspace();
+              }}
+            />
+          </div>
         ) : null}
 
         {!open ? (
@@ -580,6 +778,11 @@ export function ApplicationBrowserWorkspace({
 
             {state === "live" ? (
               <div className="space-y-2">
+                {diagnostic && !frame ? (
+                  <Alert variant="warning" title={diagnostic.title}>
+                    {diagnostic.detail}
+                  </Alert>
+                ) : null}
                 <div
                   ref={viewportRef}
                   tabIndex={0}
@@ -611,9 +814,11 @@ export function ApplicationBrowserWorkspace({
                       }}
                     />
                   ) : (
-                    <div className="flex h-64 items-center justify-center text-[12px] text-ink-subtle">
+                    <div className="flex h-64 flex-col items-center justify-center gap-2 text-[12px] text-ink-subtle">
                       <Spinner />
-                      Waiting for the first live frame…
+                      {diagnostic
+                        ? "The view is connected but the page has not sent a frame yet."
+                        : "Connected. Waiting for the first live frame…"}
                     </div>
                   )}
                   {notice ? (
@@ -645,13 +850,30 @@ export function ApplicationBrowserWorkspace({
                 </div>
               </div>
             ) : state === "error" ? (
-              <Alert variant="danger" title="Live view unavailable">
-                {error ?? "The live browser connection failed."}
+              <Alert
+                variant="danger"
+                title={diagnostic?.title ?? "Live view unavailable"}
+              >
+                <p>
+                  {diagnostic?.detail ?? "The live browser connection failed."}
+                </p>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  className="mt-2"
+                  disabled={startSession.isPending || ticket.isPending}
+                  onClick={() => void openWorkspace()}
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  Reconnect
+                </Button>
               </Alert>
             ) : (
               <Alert variant="info" title="Live view disconnected">
-                {notice ??
-                  "The view is closed. Reconnect to attach to the browser session again."}
+                {diagnostic
+                  ? `${diagnostic.title}: ${diagnostic.detail}`
+                  : notice ??
+                    "The view is closed. Reconnect to attach to the browser session again."}
               </Alert>
             )}
 
@@ -823,7 +1045,10 @@ export function ApplicationBrowserWorkspace({
                         disconnect("closed");
                         setEndConfirm(false);
                       } catch (cause) {
-                        setError(describeError(cause));
+                        setDiagnostic({
+                          title: "The browser session could not be ended",
+                          detail: describeError(cause),
+                        });
                       }
                     }}
                   >

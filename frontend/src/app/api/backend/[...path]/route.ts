@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { toApiError } from "@/lib/api/errors";
 import { backendFetch, type BackendFetchOptions } from "@/lib/api/server";
+import { sessionCookie } from "@/lib/auth/cookies";
 import { getSessionToken } from "@/lib/auth/session";
 import {
   GLASSDOOR_TIMEOUT_MS,
@@ -111,10 +112,16 @@ async function handle(
 
   if (!upstream.ok) {
     const error = await toApiError(upstream);
-    return NextResponse.json(
+    const response = NextResponse.json(
       { detail: error.message, code: error.code, details: error.details },
       { status: error.status },
     );
+    // The token was rejected (expired, revoked by logout, or account removed).
+    // Drop the stale cookie so the next request starts from a clean state.
+    if (error.status === 401) {
+      response.cookies.set(sessionCookie("", 0));
+    }
+    return response;
   }
 
   if (route.response === "file") {

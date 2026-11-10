@@ -2,6 +2,7 @@ import { apiFetch } from "@/lib/api/client";
 import type {
   ApplicationListResponse,
   ApplicationPreview,
+  ApplicationWorkflow,
   ApplicationStage,
   BrowserSession,
   BrowserSessionCapabilitiesResponse,
@@ -20,6 +21,7 @@ export const applicationKeys = {
   all: ["applications"] as const,
   list: ["applications", "list"] as const,
   detail: (id: string) => ["applications", "detail", id] as const,
+  workflow: (id: string) => ["applications", "workflow", id] as const,
   platforms: ["applications", "platforms"] as const,
 };
 
@@ -51,6 +53,12 @@ export function fetchApplication(id: string): Promise<ApplicationPreview> {
   return apiFetch<ApplicationPreview>(`applications/${id}`);
 }
 
+export function fetchApplicationWorkflow(
+  id: string,
+): Promise<ApplicationWorkflow> {
+  return apiFetch<ApplicationWorkflow>(`applications/${id}/workflow`);
+}
+
 export function fetchPlatforms(): Promise<PlatformCatalogResponse> {
   return apiFetch<PlatformCatalogResponse>("applications/platforms");
 }
@@ -70,11 +78,14 @@ export function analyzeApplication(input: {
 
 export function inspectApplication(
   id: string,
-  applicationUrl: string,
+  input: { applicationUrl: string; employerCareersUrl?: string | null },
 ): Promise<ApplicationPreview> {
   return apiFetch<ApplicationPreview>(`applications/${id}/inspect`, {
     method: "POST",
-    body: { application_url: applicationUrl },
+    body: {
+      application_url: input.applicationUrl,
+      employer_careers_url: input.employerCareersUrl ?? null,
+    },
     timeoutMs: 90_000,
   });
 }
@@ -123,7 +134,8 @@ export function confirmManualSubmission(
 ): Promise<ApplicationPreview> {
   return apiFetch<ApplicationPreview>(`applications/${id}/mark-submitted`, {
     method: "POST",
-    body: { reference },
+    // The backend refuses to record a submission without this explicit flag.
+    body: { reference, confirmed: true },
   });
 }
 

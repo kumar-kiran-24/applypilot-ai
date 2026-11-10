@@ -11,10 +11,10 @@ import {
   FileText,
   Lock,
   RefreshCw,
-  Send,
   ShieldCheck,
   Sparkles,
   UserRound,
+  Workflow,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
@@ -22,6 +22,7 @@ import { ApplicationEligibilityPanel } from "@/components/auto-apply/eligibility
 import { ApplicationBrowserWorkspace } from "@/components/applications/application-browser-workspace";
 import { ApplicationFillPanel } from "@/components/applications/application-fill-panel";
 import { ApplicationHumanLoopPanel } from "@/components/applications/application-human-loop-panel";
+import { EmployerApplicationUrlForm } from "@/components/applications/employer-application-url-form";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonClasses } from "@/components/ui/button";
@@ -37,9 +38,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import {
   useApplication,
+  useApplicationWorkflow,
   useApproveApplication,
   useConfirmManualSubmission,
-  useInspectApplication,
   useSelectApplicationResume,
   useSubmitApplication,
   useUpdateApplicationQuestion,
@@ -79,6 +80,81 @@ const STATUS: Record<
   needs_user_action: { label: "Finish manually", variant: "warning" },
   cancelled: { label: "Cancelled", variant: "neutral" },
 };
+
+const WORKFLOW_LABEL: Record<string, string> = {
+  application_created: "Application created",
+  needs_information: "Needs information",
+  needs_approval: "Needs your approval",
+  approved: "Approved",
+  browser_session_ready: "Employer page open",
+  form_analysis_pending: "Form analysis pending",
+  filling: "Filling safe fields",
+  paused_for_user: "Paused for you",
+  waiting_for_confirmation: "Waiting for confirmation",
+  ready_for_final_review: "Ready for final review",
+  awaiting_user_submission: "Awaiting your submission",
+  session_expired: "Browser session expired",
+  submitted: "Submitted",
+  failed: "Needs attention",
+  cancelled: "Cancelled",
+};
+
+const SUBMISSION_PHASE_LABEL: Record<string, string> = {
+  ready_for_final_review: "Final review ready",
+  awaiting_user_submission: "Submit on the employer's site",
+  user_confirmed_submitted: "You confirmed submission",
+  submission_confirmed: "Employer confirmation recorded",
+};
+
+function WorkflowSummary({ applicationId }: { applicationId: string }) {
+  const workflow = useApplicationWorkflow(applicationId);
+  if (workflow.isLoading) return <Skeleton className="h-20 w-full" />;
+  if (workflow.error || !workflow.data) return null;
+  const data = workflow.data;
+  const next = data.next_actions.find((action) => action.enabled);
+  return (
+    <Card>
+      <CardContent className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="flex items-center gap-1.5 text-[11px] uppercase tracking-[0.1em] text-ink-subtle">
+            <Workflow aria-hidden="true" className="h-3.5 w-3.5" />
+            Workflow
+          </p>
+          <p className="mt-1 text-[13px] font-medium text-ink">
+            {WORKFLOW_LABEL[data.workflow_stage] ?? data.workflow_stage}
+          </p>
+          <p className="mt-0.5 text-[11px] text-ink-subtle">
+            {data.blocking_items.length > 0
+              ? `${data.blocking_items.length} blocking item${
+                  data.blocking_items.length === 1 ? "" : "s"
+                }: ${data.blocking_items[0]}`
+              : data.ready_for_final_review
+                ? "All safe fields are done. Review the employer's page, then submit it yourself."
+                : "Progress is saved after every step."}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {data.submission_phase ? (
+            <Badge variant="brand">
+              {SUBMISSION_PHASE_LABEL[data.submission_phase] ??
+                data.submission_phase}
+            </Badge>
+          ) : null}
+          {next ? <Badge variant="neutral">Next: {next.label}</Badge> : null}
+        </div>
+        {data.recovery.length > 0 ? (
+          <div className="w-full space-y-1">
+            {data.recovery.map((hint) => (
+              <p key={hint} className="text-[11px] text-amber-200/80">
+                {hint}
+              </p>
+            ))}
+          </div>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
 
 const STAGES: Array<{ value: ApplicationStage; label: string }> = [
   { value: "applied", label: "Applied" },
@@ -621,8 +697,6 @@ function ApplicationUrlPanel({
   applicationId: string;
   preview: ApplicationPreview;
 }) {
-  const inspect = useInspectApplication(applicationId);
-  const [url, setUrl] = useState(preview.application_url);
   const link = safeExternalUrl(preview.application_url);
   const editable = EDITABLE.includes(preview.status);
 
@@ -632,47 +706,32 @@ function ApplicationUrlPanel({
         <div>
           <CardTitle>Employer application page</CardTitle>
           <CardDescription>
-            Paste the employer&apos;s own application URL when the discovered link
-            points to a job board. ApplyPilot never scrapes job boards.
+            The job listing, the employer careers page and the actual
+            application form are tracked separately. ApplyPilot opens only the
+            employer&apos;s own form and never scrapes job boards.
           </CardDescription>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           <Badge variant="brand">{preview.platform_name}</Badge>
           <Badge variant="neutral">{MODE[preview.automation_mode]}</Badge>
+          {preview.application_url_is_job_board ? (
+            <Badge variant="warning">Job listing only</Badge>
+          ) : null}
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
-        {editable ? (
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <input
-              value={url}
-              onChange={(event) => setUrl(event.target.value)}
-              className={inputClass}
-              aria-label="Employer application URL"
-              placeholder="https://boards.greenhouse.io/company/jobs/123"
-            />
-            <Button
-              variant="secondary"
-              disabled={!url.trim() || inspect.isPending}
-              onClick={() => inspect.mutate(url.trim())}
-              className="shrink-0"
-            >
-              {inspect.isPending ? (
-                <>
-                  <Spinner className="h-4 w-4" />
-                  Inspecting…
-                </>
-              ) : (
-                <>
-                  <RefreshCw aria-hidden="true" className="h-4 w-4" />
-                  Inspect form
-                </>
-              )}
-            </Button>
-          </div>
-        ) : null}
+        <EmployerApplicationUrlForm
+          applicationId={applicationId}
+          initialApplicationUrl={preview.application_url}
+          jobListingUrl={preview.job_listing_url}
+          employerCareersUrl={preview.employer_careers_url}
+          suggestedApplicationUrl={preview.suggested_application_url}
+          isJobBoard={preview.application_url_is_job_board}
+          disabled={!editable}
+          submitLabel="Validate URL and inspect form"
+        />
 
-        {link ? (
+        {link && !preview.application_url_is_job_board ? (
           <a
             href={link}
             target="_blank"
@@ -682,12 +741,6 @@ function ApplicationUrlPanel({
             Open the employer&apos;s page
             <ArrowUpRight aria-hidden="true" className="h-3.5 w-3.5" />
           </a>
-        ) : null}
-
-        {inspect.error ? (
-          <Alert variant="danger" title="Could not inspect the application">
-            {describeError(inspect.error)}
-          </Alert>
         ) : null}
 
         {preview.requires_account ? (
@@ -906,10 +959,16 @@ export function ApplicationWorkspace({ applicationId }: { applicationId: string 
 
       <ApplicationEligibilityPanel applicationId={applicationId} />
 
+      <WorkflowSummary applicationId={applicationId} />
+
       <ApplicationBrowserWorkspace
         applicationId={applicationId}
         company={preview.company}
         applicationUrl={preview.application_url}
+        jobListingUrl={preview.job_listing_url}
+        employerCareersUrl={preview.employer_careers_url}
+        applicationUrlIsJobBoard={preview.application_url_is_job_board}
+        suggestedApplicationUrl={preview.suggested_application_url}
       />
 
       <ApplicationFillPanel applicationId={applicationId} />
@@ -1077,8 +1136,9 @@ export function ApplicationWorkspace({ applicationId }: { applicationId: string 
                 <div>
                   <CardTitle>Review and submission</CardTitle>
                   <CardDescription>
-                    ApplyPilot submits only after your explicit approval and never
-                    bypasses a company account, OTP, MFA or CAPTCHA.
+                    ApplyPilot fills safe fields and never clicks Submit, Apply or
+                    Finish. You submit the application yourself on the employer&apos;s
+                    page; approval records what you reviewed.
                   </CardDescription>
                 </div>
                 {preview.approved_at ? (
@@ -1165,9 +1225,10 @@ export function ApplicationWorkspace({ applicationId }: { applicationId: string 
                         className="mt-0.5 h-4 w-4 rounded border-white/20 bg-white/[0.04]"
                       />
                       <span className="text-[12px] leading-relaxed text-ink-muted">
-                        I reviewed every answer and the selected resume, and I
-                        authorize ApplyPilot to submit this application if the
-                        platform supports it.
+                        I reviewed every answer and the selected resume. I
+                        understand ApplyPilot will not submit the application; I
+                        will complete the final submission on the employer&apos;s
+                        site.
                       </span>
                     </label>
 
@@ -1199,12 +1260,15 @@ export function ApplicationWorkspace({ applicationId }: { applicationId: string 
                             {submit.isPending ? (
                               <>
                                 <Spinner className="h-4 w-4" />
-                                Submitting…
+                                Preparing…
                               </>
                             ) : (
                               <>
-                                <Send aria-hidden="true" className="h-4 w-4" />
-                                Submit application
+                                <ArrowUpRight
+                                  aria-hidden="true"
+                                  className="h-4 w-4"
+                                />
+                                Continue to manual submission
                               </>
                             )}
                           </Button>
@@ -1234,9 +1298,11 @@ export function ApplicationWorkspace({ applicationId }: { applicationId: string 
                     </div>
 
                     <p className="text-[11px] leading-relaxed text-ink-subtle">
-                      {preview.submission_mode === "manual"
-                        ? "This platform is completed manually. Approval records your review; you will submit on the employer's site."
-                        : "Approval is bound to the answers and resume above. Editing anything afterwards requires you to approve again."}
+                      Approval is bound to the exact answers and resume above.
+                      ApplyPilot never submits the application for you: after the
+                      handoff steps appear, finish the form on the employer&apos;s
+                      site and mark it as submitted. Editing anything afterwards
+                      requires you to approve again.
                     </p>
                   </>
                 ) : null}

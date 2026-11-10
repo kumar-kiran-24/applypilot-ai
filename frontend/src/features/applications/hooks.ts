@@ -16,6 +16,7 @@ import {
   fetchBrowserSession,
   confirmManualSubmission,
   fetchApplication,
+  fetchApplicationWorkflow,
   fetchApplications,
   fetchFillExecution,
   fetchFillPlan,
@@ -45,6 +46,7 @@ import type {
   ApplicationListResponse,
   ApplicationPreview,
   ApplicationStage,
+  ApplicationWorkflow,
   BrowserSession,
   BrowserSessionCapabilitiesResponse,
   BrowserViewTicketResponse,
@@ -84,6 +86,14 @@ export function useApplication(id: string) {
   });
 }
 
+export function useApplicationWorkflow(id: string) {
+  return useQuery<ApplicationWorkflow>({
+    queryKey: applicationKeys.workflow(id),
+    queryFn: () => fetchApplicationWorkflow(id),
+    staleTime: 5_000,
+  });
+}
+
 export function useApplicationPlatforms() {
   return useQuery<PlatformCatalogResponse>({
     queryKey: applicationKeys.platforms,
@@ -108,10 +118,16 @@ export function useAnalyzeApplication() {
 
 export function useInspectApplication(id: string) {
   const queryClient = useQueryClient();
-  return useMutation<ApplicationPreview, Error, string>({
-    mutationFn: (applicationUrl) => inspectApplication(id, applicationUrl),
+  return useMutation<
+    ApplicationPreview,
+    Error,
+    { applicationUrl: string; employerCareersUrl?: string | null }
+  >({
+    mutationFn: (input) => inspectApplication(id, input),
     onSuccess: async () => {
       await invalidateApplications(queryClient, id);
+      // A new form URL changes what the browser workspace may open.
+      await queryClient.invalidateQueries({ queryKey: browserSessionKeys.all });
     },
   });
 }

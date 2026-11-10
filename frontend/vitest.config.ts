@@ -7,7 +7,7 @@ export default defineConfig({
   esbuild: { jsx: "automatic" },
   test: {
     environment: "node",
-    include: ["tests/**/*.test.ts"],
+    include: ["tests/**/*.test.{ts,tsx}"],
     restoreMocks: true,
   },
   resolve: {

@@ -321,6 +321,10 @@ export interface ApplicationPreview {
   platform: string;
   platform_name: string;
   application_url: string;
+  job_listing_url: string | null;
+  employer_careers_url: string | null;
+  application_url_is_job_board: boolean;
+  suggested_application_url: string | null;
   automation_mode: AutomationMode;
   inspection_mode: InspectionMode;
   status: ApplicationStatus;
@@ -390,6 +394,100 @@ export interface SubmissionResponse {
   reference: string | null;
   steps: string[];
   application: ApplicationPreview;
+}
+
+export type WorkflowStage =
+  | "discovered"
+  | "matched"
+  | "application_created"
+  | "needs_information"
+  | "needs_approval"
+  | "approved"
+  | "browser_session_ready"
+  | "form_analysis_pending"
+  | "filling"
+  | "paused_for_user"
+  | "waiting_for_confirmation"
+  | "ready_for_final_review"
+  | "awaiting_user_submission"
+  | "submitted"
+  | "failed"
+  | "cancelled"
+  | "session_expired";
+
+export type SubmissionPhase =
+  | "ready_for_final_review"
+  | "awaiting_user_submission"
+  | "user_confirmed_submitted"
+  | "submission_confirmed";
+
+export interface WorkflowAction {
+  action: string;
+  label: string;
+  enabled: boolean;
+  reason: string | null;
+}
+
+export interface ApplicationWorkflow {
+  application_id: string;
+  job_id: string;
+  job_title: string;
+  company: string | null;
+  application_url: string;
+  status: ApplicationStatus;
+  workflow_stage: WorkflowStage;
+  submission_phase: SubmissionPhase | null;
+  ready_for_final_review: boolean;
+  missing_required_count: number;
+  blocking_items: string[];
+  next_actions: WorkflowAction[];
+  browser: {
+    session_id: string | null;
+    run_number: number | null;
+    state: string | null;
+    browser_status: string | null;
+    current_url: string | null;
+    live: boolean;
+    expired: boolean;
+    view_available: boolean;
+  };
+  analysis: {
+    analysis_id: string | null;
+    version: number | null;
+    field_count: number;
+    page_url: string | null;
+    analyzed_at: string | null;
+  };
+  execution: {
+    execution_id: string | null;
+    execution_status: string | null;
+    run_number: number | null;
+    analysis_version: number | null;
+    succeeded_count: number;
+    verified_count: number;
+    failed_count: number;
+    skipped_count: number;
+    pending_confirmation_count: number;
+    can_pause: boolean;
+    can_resume: boolean;
+  };
+  interventions: {
+    total: number;
+    pending_count: number;
+    user_working_count: number;
+    blocking_count: number;
+  };
+  submission: {
+    confirmed_by_user: boolean;
+    confirmed_at: string | null;
+    reference: string | null;
+    confirmation_url: string | null;
+    confirmation_message: string | null;
+    employer_confirmation_detected: boolean;
+  };
+  recovery: string[];
+  as_of: string;
+  final_submission_note: string;
 }
 
 export interface ApplicationPlatformInfo {

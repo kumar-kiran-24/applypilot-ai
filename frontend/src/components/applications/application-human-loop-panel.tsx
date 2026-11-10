@@ -2,11 +2,9 @@
 
 import {
   AlertTriangle,
-  ArrowUpRight,
   CheckCircle2,
   ClipboardCheck,
   Clock3,
-  ExternalLink,
   FileCheck2,
   Hand,
   ListChecks,
@@ -457,29 +455,28 @@ export function ApplicationHumanLoopPanel({
             </div>
 
             {!data.view.user_can_interact ? (
-              <Alert variant="info" title="The employer's page is not shown in ApplyPilot">
-                {data.view.reason} Changes you make in a separate browser cannot be
-                seen by the backend session. Provide missing answers in ApplyPilot,
-                or complete and submit the employer&apos;s page yourself. ApplyPilot
-                never submits it for you.
+              <Alert variant="info" title="Live browser view is not enabled">
+                {data.view.reason}
+                {data.view.required_component ? (
+                  <span className="mt-1 block text-ink-subtle">
+                    Required setting: {data.view.required_component}.
+                  </span>
+                ) : null}
               </Alert>
-            ) : null}
-
-            <div className="flex flex-wrap items-center gap-2">
-              <a
-                href={data.application_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-white/10 px-2.5 text-[12px] font-medium text-ink-muted transition-colors hover:border-white/20 hover:text-ink"
-              >
-                <ExternalLink className="h-3.5 w-3.5" />
-                Open employer page yourself
-                <ArrowUpRight className="h-3.5 w-3.5" />
-              </a>
-              <p className="text-[11px] text-ink-subtle">
-                This external page is separate from the ApplyPilot browser session.
+            ) : (
+              <p className="flex items-center gap-1.5 text-[11px] text-ink-subtle">
+                <ShieldCheck aria-hidden="true" className="h-3.5 w-3.5 text-emerald-300" />
+                The employer&apos;s page is streamed in the{" "}
+                <a
+                  href="#live-browser-workspace"
+                  className="text-sky-300 hover:underline"
+                >
+                  Live browser workspace
+                </a>{" "}
+                above. Complete CAPTCHA, OTP, MFA and legal declarations there;
+                nothing is submitted automatically.
               </p>
-            </div>
+            )}
 
             {reanalyze.data ? (
               <div className="rounded-xl border border-white/[0.07] bg-white/[0.02] p-3">
