@@ -25,6 +25,11 @@ from app.models.application_field_execution import (
     FieldExecutionStatus,
 )
 from app.models.application_form_analysis import ApplicationFormAnalysis
+from app.models.application_intervention import (
+    ApplicationIntervention,
+    InterventionStatus,
+    InterventionType,
+)
 from app.models.auth_code import AuthCode
 from app.models.auto_apply import AutoApplyApproval, UserAutoApplySettings
 from app.models.browser_session import (
@@ -47,6 +52,7 @@ from app.models.missing_information import (
 from app.models.preference import JobPreference, RelocationPreference, WorkMode
 from app.models.project import Project
 from app.models.resume import Resume, ResumeParsingStatus
+from app.models.revoked_token import RevokedToken
 from app.models.user import User
 
 __all__ = [
@@ -56,6 +62,7 @@ __all__ = [
     "ApplicationAnswer",
     "ApplicationFieldExecution",
     "ApplicationFormAnalysis",
+    "ApplicationIntervention",
     "ApplicationQuestion",
     "ApplicationStage",
     "ApplicationStatus",
@@ -73,6 +80,8 @@ __all__ = [
     "FieldExecutionStatus",
     "GmailConnection",
     "InspectionMode",
+    "InterventionStatus",
+    "InterventionType",
     "Job",
     "JobPreference",
     "JobResumeMatch",
@@ -85,6 +94,7 @@ __all__ = [
     "RelocationPreference",
     "Resume",
     "ResumeParsingStatus",
+    "RevokedToken",
     "User",
     "UserAutoApplySettings",
     "VerificationStatus",

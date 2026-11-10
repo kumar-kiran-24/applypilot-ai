@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.core.config import Settings, get_settings
+from app.core.request_context import current_request_id
 
 _RESERVED_RECORD_KEYS = frozenset(logging.LogRecord("", 0, "", 0, "", None, None).__dict__)
 
@@ -29,15 +30,18 @@ SENSITIVE_KEY_MARKERS = (
     "credential",
     "private_key",
     "client_secret",
+    "ticket",
 )
 
 REDACTED = "[REDACTED]"
 
-# OAuth codes, state and tokens can appear inside a rendered message (uvicorn's
-# access log includes the full query string). They are redacted in-place so a
-# callback URL never writes a usable authorization code to the log stream.
+# OAuth codes, state, tokens and the single-use live-view ticket can appear
+# inside a rendered message (uvicorn's access log includes the full query
+# string). They are redacted in-place so neither a callback URL nor a WebSocket
+# handshake writes a usable secret to the log stream.
 _SENSITIVE_QUERY_PARAM = re.compile(
-    r"(?i)\b(code|state|access_token|refresh_token|id_token|client_secret)=([^&\s\"]+)"
+    r"(?i)\b(code|state|access_token|refresh_token|id_token|client_secret|"
+    r"ticket|api_key|password|otp|captcha|authorization)=([^&\s\"]+)"
 )
 
 
@@ -79,6 +83,14 @@ class RedactingFilter(logging.Filter):
         return True
 
 
+class CorrelationFilter(logging.Filter):
+    """Attach the current request id to every record (empty when absent)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = current_request_id() or None
+        return True
+
+
 class JsonFormatter(logging.Formatter):
     """Render log records as single-line JSON."""
 
@@ -111,6 +123,7 @@ def setup_logging(settings: Settings | None = None, level: int | None = None) ->
     handler = logging.StreamHandler(stream=sys.stdout)
     handler.setFormatter(JsonFormatter())
     handler.addFilter(RedactingFilter())
+    handler.addFilter(CorrelationFilter())
 
     root = logging.getLogger()
     root.handlers.clear()

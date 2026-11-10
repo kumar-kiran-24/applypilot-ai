@@ -6,12 +6,14 @@ the ``get_db`` dependency, so no PostgreSQL instance and no API keys are needed.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 import app.models
 import pytest
 import pytest_asyncio
+from app.core.metrics import reset_metrics
+from app.core.rate_limit import reset_rate_limits
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
@@ -25,6 +27,16 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import StaticPool
 
 TEST_DATABASE_URL = "sqlite+aiosqlite://"
+
+
+@pytest.fixture(autouse=True)
+def reset_in_process_rate_limits() -> Iterator[None]:
+    """Keep per-client auth rate limits from leaking between tests."""
+    reset_rate_limits()
+    reset_metrics()
+    yield
+    reset_rate_limits()
+    reset_metrics()
 
 
 @pytest_asyncio.fixture

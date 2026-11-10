@@ -93,7 +93,14 @@ class FakeDriver:
         self.fail = False
         self.unsafe = False
 
-    async def open(self, url: str, *, policy: Any, user_id: str) -> FakeHandle:
+    async def open(
+        self,
+        url: str,
+        *,
+        policy: Any,
+        user_id: str,
+        pinned_address: str | None = None,
+    ) -> FakeHandle:
         del policy, user_id
         if self.fail:
             raise BrowserUnavailableError("Playwright is not installed.")

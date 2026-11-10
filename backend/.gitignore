@@ -27,8 +27,9 @@ env/
 .vscode/
 .DS_Store
 
-# Uploaded resumes (local storage backend) - never commit user documents
-var/resumes/
+# Runtime artefacts: uploaded resumes, screenshots and benchmark/load reports.
+# Never commit user documents.
+var/
 
 # Browser automation artefacts
 playwright-report/

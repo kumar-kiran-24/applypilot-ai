@@ -101,6 +101,45 @@ _ACTIVE_RUN_STATES = frozenset(
     {FieldExecutionStatus.RUNNING, FieldExecutionStatus.PLANNED}
 )
 
+_RESUMABLE_RUN_STATES = frozenset(
+    {
+        FieldExecutionStatus.PAUSED,
+        FieldExecutionStatus.NEEDS_USER_INPUT,
+        FieldExecutionStatus.WAITING_FOR_CONFIRMATION,
+    }
+)
+
+
+def _coordination_pause(
+    handle: PersistentBrowserHandle, navigation_epoch: int
+) -> str | None:
+    """Return a pause reason when the user or a navigation interrupted filling."""
+    current_epoch = getattr(handle, "navigation_epoch", navigation_epoch)
+    if current_epoch != navigation_epoch:
+        return (
+            "The employer's page moved to a new URL while filling. Re-analyze "
+            "the form, then resume; the stored analysis is stale."
+        )
+    active = getattr(handle, "user_input_active", None)
+    if callable(active) and active(1.5):
+        return (
+            "You interacted with the employer's page, so ApplyPilot paused "
+            "before touching more fields. Re-analyze when you are ready to "
+            "continue."
+        )
+    return None
+
+
+def _upsert_result(
+    results: list[FillFieldResult], result: FillFieldResult
+) -> None:
+    """Keep exactly one outcome per field so a retried field cannot double-count."""
+    for index, existing in enumerate(results):
+        if existing.field_id == result.field_id:
+            results[index] = result
+            return
+    results.append(result)
+
 
 class ApplicationFieldFillService:
     """Plan and execute safe field filling for one owned application."""
@@ -165,10 +204,21 @@ class ApplicationFieldFillService:
                         "This run is paused. Resume it instead of starting a new one.",
                         code="field_fill_paused",
                     )
-                if row.status is FieldExecutionStatus.NEEDS_USER_INPUT:
+                if row.status in {
+                    FieldExecutionStatus.NEEDS_USER_INPUT,
+                    FieldExecutionStatus.WAITING_FOR_CONFIRMATION,
+                }:
                     # The user has already seen this plan; do not re-type into the
                     # employer's form just because the start button was clicked twice.
                     return self._execution_response(row, analysis.version)
+                if row.status in {
+                    FieldExecutionStatus.READY_FOR_FINAL_REVIEW,
+                    FieldExecutionStatus.COMPLETED,
+                }:
+                    raise FieldFillConflictError(
+                        "This fill run is already complete and ready for your review.",
+                        code="field_fill_already_complete",
+                    )
 
         now = _utcnow()
         if row is None:
@@ -231,10 +281,10 @@ class ApplicationFieldFillService:
         if row is None:
             raise FieldFillNotFoundError()
         if (
-            row.status in _ACTIVE_RUN_STATES
+            row.status in (_ACTIVE_RUN_STATES | _RESUMABLE_RUN_STATES)
             and session_row.browser_status.value != "open"
         ):
-            row.status = FieldExecutionStatus.FAILED
+            row.status = FieldExecutionStatus.SESSION_EXPIRED
             row.failure_code = "browser_session_expired"
             row.failure_reason = (
                 "The browser session expired before the fill run finished. "
@@ -258,6 +308,7 @@ class ApplicationFieldFillService:
         if row.status not in {
             FieldExecutionStatus.RUNNING,
             FieldExecutionStatus.NEEDS_USER_INPUT,
+            FieldExecutionStatus.WAITING_FOR_CONFIRMATION,
             FieldExecutionStatus.PLANNED,
         }:
             raise FieldFillConflictError(
@@ -281,18 +332,27 @@ class ApplicationFieldFillService:
         row = await self._row_for_application(application.id, user.id, for_update=True)
         if row is None:
             raise FieldFillNotFoundError()
-        if row.status is not FieldExecutionStatus.PAUSED:
+        if row.status not in _RESUMABLE_RUN_STATES:
             raise FieldFillConflictError(
-                "Only a paused field-fill run can be resumed.",
+                "Only a run paused for the user can be resumed.",
                 code="field_fill_not_paused",
             )
-        if row.analysis_id != analysis.id:
-            raise FieldFillConflictError(
-                "The form was analysed again after this run was planned. "
-                "Review the new fill plan before continuing.",
-                code="analysis_version_changed",
-            )
         plan = await self._build_plan(user, application, analysis)
+        if row.analysis_id != analysis.id:
+            # A newer analysis was produced after human intervention. Rebuild the
+            # plan from it instead of reusing stale field coordinates, but keep
+            # successful results that still refer to fields on the current form.
+            current_ids = {item.field_id for item in plan.fields}
+            row.results = [
+                result
+                for result in (row.results or [])
+                if result.get("field_id") in current_ids
+                and result.get("status") == FillFieldStatus.SUCCEEDED.value
+            ]
+            row.analysis_id = analysis.id
+            row.analysis_version = analysis.version
+            row.plan = [item.persisted for item in plan.fields]
+            row.summary = self._result_summary(self._result_models(row), plan)
         row.status = FieldExecutionStatus.RUNNING
         row.pause_reason = None
         row.paused_at = None
@@ -338,6 +398,7 @@ class ApplicationFieldFillService:
             if item.status is FillFieldStatus.SUCCEEDED
         }
         results: list[FillFieldResult] = list(self._result_models(row))
+        navigation_epoch = int(getattr(handle, "navigation_epoch", 0) or 0)
 
         # Process ordinary fields first; a resume upload is last so a validation
         # error on the form does not waste the file interaction.
@@ -353,7 +414,13 @@ class ApplicationFieldFillService:
         ]
 
         for item in ordered:
-            results.append(await self._execute_field(handle, item))
+            pause_reason = _coordination_pause(handle, navigation_epoch)
+            if pause_reason:
+                row.status = FieldExecutionStatus.NEEDS_USER_INPUT
+                row.pause_reason = pause_reason
+                await self._persist_progress(row, results, plan)
+                return
+            _upsert_result(results, await self._execute_field(handle, item))
             await self._persist_progress(row, results, plan)
             if row.status is FieldExecutionStatus.CANCELLED:
                 return
@@ -362,7 +429,16 @@ class ApplicationFieldFillService:
             try:
                 async with self.uploads.materialize(user, application.resume) as path:
                     for item in uploads:
-                        results.append(await self._execute_field(handle, item, upload_path=path))
+                        pause_reason = _coordination_pause(handle, navigation_epoch)
+                        if pause_reason:
+                            row.status = FieldExecutionStatus.NEEDS_USER_INPUT
+                            row.pause_reason = pause_reason
+                            await self._persist_progress(row, results, plan)
+                            return
+                        _upsert_result(
+                            results,
+                            await self._execute_field(handle, item, upload_path=path),
+                        )
                         await self._persist_progress(row, results, plan)
                         if row.status is FieldExecutionStatus.CANCELLED:
                             return
@@ -375,7 +451,8 @@ class ApplicationFieldFillService:
                     },
                 )
                 for item in uploads:
-                    results.append(
+                    _upsert_result(
+                        results,
                         FillFieldResult(
                             field_id=item.field_id,
                             label=item.label,
@@ -384,8 +461,15 @@ class ApplicationFieldFillService:
                             verified=False,
                             reason="The selected resume could not be prepared for upload.",
                             source=item.source.value,
-                        )
+                        ),
                     )
+
+        pause_reason = _coordination_pause(handle, navigation_epoch)
+        if pause_reason:
+            row.status = FieldExecutionStatus.NEEDS_USER_INPUT
+            row.pause_reason = pause_reason
+            await self._persist_progress(row, results, plan)
+            return
 
         # Fields that were never candidates for execution are reported so the
         # UI can show confirmations and human steps together with outcomes.
@@ -482,11 +566,16 @@ class ApplicationFieldFillService:
         row.summary = summary
         row.last_activity_at = _utcnow()
         row.pause_reason = None
-        if summary["pending_confirmation_count"] or summary["pending_human_input_count"]:
+        if summary["pending_human_input_count"]:
             row.status = FieldExecutionStatus.NEEDS_USER_INPUT
             row.pause_reason = (
-                "Some fields need your confirmation or input in the employer's "
-                "form. ApplyPilot stopped before touching them."
+                "Some fields need your input in the employer's form. "
+                "ApplyPilot stopped before touching them."
+            )
+        elif summary["pending_confirmation_count"]:
+            row.status = FieldExecutionStatus.WAITING_FOR_CONFIRMATION
+            row.pause_reason = (
+                "Some fields need your confirmation before they can be filled."
             )
         elif summary["failed_count"]:
             row.status = FieldExecutionStatus.NEEDS_USER_INPUT
@@ -495,7 +584,7 @@ class ApplicationFieldFillService:
                 "before continuing."
             )
         else:
-            row.status = FieldExecutionStatus.COMPLETED
+            row.status = FieldExecutionStatus.READY_FOR_FINAL_REVIEW
             row.completed_at = _utcnow()
 
     # --- Context ------------------------------------------------------------
@@ -672,15 +761,17 @@ class ApplicationFieldFillService:
     ) -> FillExecutionResponse:
         summary = dict(row.summary or {})
         results = self._result_models(row)
-        can_resume = row.status is FieldExecutionStatus.PAUSED
+        can_resume = row.status in _RESUMABLE_RUN_STATES
         can_pause = row.status in {
             FieldExecutionStatus.RUNNING,
             FieldExecutionStatus.NEEDS_USER_INPUT,
+            FieldExecutionStatus.WAITING_FOR_CONFIRMATION,
         }
         can_cancel = row.status not in {
             FieldExecutionStatus.CANCELLED,
             FieldExecutionStatus.COMPLETED,
             FieldExecutionStatus.FAILED,
+            FieldExecutionStatus.SESSION_EXPIRED,
         }
         return FillExecutionResponse(
             execution_id=row.id,

@@ -22,8 +22,10 @@ is raised instead of pretending a session exists.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import re
+import time
 import uuid
 from typing import Protocol
 from urllib.parse import urlsplit
@@ -35,6 +37,7 @@ from app.integrations.browser.field_actions import (
     FieldActionKind,
     FieldActionResult,
 )
+from app.integrations.browser.launch_policy import chromium_launch_args
 from app.integrations.browser.session import BrowserUnavailableError
 from app.services.application_url_security import NavigationPolicy, UnsafeNavigationError
 
@@ -51,9 +54,12 @@ class PersistentBrowserHandle(Protocol):
     async def content(self) -> str:
         """Return the current main-frame HTML for read-only form analysis.
 
-        This is the only page-content capability exposed to Phase 2E services.
-        It never executes JavaScript, reads cookie/storage state or returns a
-        password/OTP/CAPTCHA value; the extractor filters those itself.
+        The returned HTML reflects the *live* value of visible form controls
+        (text, textarea, select, checkbox and radio) as well as their static
+        attributes, so a fresh analysis can see what the user typed. Values are
+        mirrored into a detached clone; the employer's live DOM is not changed.
+        Password, file and hidden inputs are left untouched, and no cookie,
+        storage state, OTP, MFA or CAPTCHA answer is read.
         """
         ...
 
@@ -74,6 +80,28 @@ class PersistentBrowserHandle(Protocol):
         """True when the page attempted to leave the approved origins."""
         ...
 
+    @property
+    def interaction_lock(self) -> asyncio.Lock:
+        """Serialises Stage C actions and forwarded user input on the page."""
+        ...
+
+    async def cdp_session(self) -> object:
+        """Return an internal CDP session for the same page (never exposed)."""
+        ...
+
+    def mark_user_input(self) -> None:
+        """Record that the user just interacted with the live page."""
+        ...
+
+    def user_input_active(self, seconds: float = 2.0) -> bool:
+        """True while the user interacted within the last ``seconds``."""
+        ...
+
+    @property
+    def navigation_epoch(self) -> int:
+        """Increments on every main-frame navigation (analysis is then stale)."""
+        ...
+
     async def close(self) -> None:
         """Close the context and browser; safe to call more than once."""
         ...
@@ -88,6 +116,7 @@ class PersistentBrowserDriver(Protocol):
         *,
         policy: NavigationPolicy,
         user_id: str,
+        pinned_address: str | None = None,
     ) -> PersistentBrowserHandle:
         ...
 
@@ -132,6 +161,46 @@ _FIND_TARGET_JS = """
   const marker = `apc-${token}`;
   target.setAttribute('data-applypilot-target', marker);
   return marker;
+}
+"""
+
+#: Build an HTML snapshot that reflects live form values without mutating the
+#: page. Controls are matched by document order, which cloning preserves.
+_SNAPSHOT_HTML_JS = """
+() => {
+  const root = document.documentElement.cloneNode(true);
+  const originals = Array.from(document.querySelectorAll('input,textarea,select'));
+  const clones = Array.from(root.querySelectorAll('input,textarea,select'));
+  originals.forEach((el, index) => {
+    const clone = clones[index];
+    if (!clone) return;
+    const tag = el.tagName.toLowerCase();
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    if (tag === 'input' && ['password', 'hidden', 'file'].includes(type)) return;
+    if (tag === 'textarea') {
+      clone.textContent = el.value || '';
+      return;
+    }
+    if (tag === 'select') {
+      const options = Array.from(clone.querySelectorAll('option'));
+      // An empty value is the placeholder option, not a user selection.
+      const chosen = Boolean(el.value);
+      Array.from(el.options || []).forEach((option, i) => {
+        const target = options[i];
+        if (!target) return;
+        if (chosen && option.selected) target.setAttribute('selected', '');
+        else target.removeAttribute('selected');
+      });
+      return;
+    }
+    if (type === 'checkbox' || type === 'radio') {
+      if (el.checked) clone.setAttribute('checked', '');
+      else clone.removeAttribute('checked');
+      return;
+    }
+    clone.setAttribute('value', el.value || '');
+  });
+  return '<!doctype html>' + root.outerHTML;
 }
 """
 
@@ -180,6 +249,11 @@ class _PlaywrightHandle:
         self._policy = policy
         self._closed = False
         self._unsafe_navigation = False
+        self._interaction_lock = asyncio.Lock()
+        self._last_user_input = 0.0
+        self._navigation_epoch = 0
+        self._last_main_url = ""
+        self._cdp: object | None = None
         context.on("page", self._on_new_page)  # type: ignore[attr-defined]
         page.on("framenavigated", self._on_navigated)  # type: ignore[attr-defined]
         page.on("popup", self._on_popup)  # type: ignore[attr-defined]
@@ -221,6 +295,9 @@ class _PlaywrightHandle:
         url = getattr(frame, "url", "")
         if not url or url == "about:blank":
             return
+        if url != self._last_main_url:
+            self._last_main_url = url
+            self._navigation_epoch += 1
         if not self._is_allowed(url):
             self._unsafe_navigation = True
             logger.warning(
@@ -258,6 +335,12 @@ class _PlaywrightHandle:
         if self._closed:
             return ""
         try:
+            snapshot = await self._page.evaluate(_SNAPSHOT_HTML_JS)  # type: ignore[attr-defined]
+            if isinstance(snapshot, str) and snapshot.strip():
+                return snapshot
+        except Exception:  # pragma: no cover - CSP/closed/navigated page
+            pass
+        try:
             return str(await self._page.content())  # type: ignore[attr-defined]
         except Exception:  # pragma: no cover - page crashed or navigated away
             return ""
@@ -272,9 +355,56 @@ class _PlaywrightHandle:
         except Exception:  # pragma: no cover - browser crashed
             return False
 
+    # --- Live-view coordination ---------------------------------------------
+    @property
+    def interaction_lock(self) -> asyncio.Lock:
+        return self._interaction_lock
+
+    async def cdp_session(self) -> object:
+        """Create (once) an internal CDP session bound to the same page."""
+        if self._closed:
+            raise BrowserUnavailableError("The browser session is closed.")
+        if self._cdp is None:
+            self._cdp = await self._context.new_cdp_session(self._page)  # type: ignore[attr-defined]
+        return self._cdp
+
+    def mark_user_input(self) -> None:
+        self._last_user_input = time.monotonic()
+
+    def user_input_active(self, seconds: float = 2.0) -> bool:
+        return time.monotonic() - self._last_user_input < seconds
+
+    @property
+    def navigation_epoch(self) -> int:
+        return self._navigation_epoch
+
     # --- Stage C field actions ---------------------------------------------
     async def apply_field_action(self, action: FieldAction) -> FieldActionResult:
         """Fill, select, check or attach a file; never click or submit."""
+        if self.user_input_active(1.0):
+            return FieldActionResult(
+                False,
+                action.field_id,
+                reason=(
+                    "You are interacting with the employer's page, so ApplyPilot "
+                    "did not overwrite your input."
+                ),
+            )
+        async with self._interaction_lock:
+            # Re-check after waiting: the user may have typed while automation
+            # was queued behind the lock.
+            if self.user_input_active(1.0):
+                return FieldActionResult(
+                    False,
+                    action.field_id,
+                    reason=(
+                        "You are interacting with the employer's page, so "
+                        "ApplyPilot did not overwrite your input."
+                    ),
+                )
+            return await self._apply_field_action(action)
+
+    async def _apply_field_action(self, action: FieldAction) -> FieldActionResult:
         page = self._page
         if self._closed:
             return FieldActionResult(False, action.field_id, reason="The browser is closed.")
@@ -531,6 +661,10 @@ class _PlaywrightHandle:
         if self._closed:
             return
         self._closed = True
+        if self._cdp is not None:
+            with contextlib.suppress(Exception):
+                await self._cdp.detach()  # type: ignore[attr-defined]
+            self._cdp = None
         for target in (self._context, self._browser):
             with contextlib.suppress(Exception):
                 await target.close()  # type: ignore[attr-defined]
@@ -550,6 +684,7 @@ class PlaywrightPersistentBrowserDriver:
         *,
         policy: NavigationPolicy,
         user_id: str,
+        pinned_address: str | None = None,
     ) -> PersistentBrowserHandle:
         if not self._settings.APPLICATION_AUTOMATION_ENABLED:
             raise BrowserUnavailableError(
@@ -564,8 +699,14 @@ class PlaywrightPersistentBrowserDriver:
 
         playwright = await async_playwright().start()
         try:
+            # Fixed hardening flags, the V8 heap ceiling and (when enabled)
+            # the validated-DNS pin all live in launch_policy so they are
+            # unit-tested without starting a browser.
             browser = await playwright.chromium.launch(
-                headless=self._settings.APPLICATION_BROWSER_HEADLESS
+                headless=self._settings.APPLICATION_BROWSER_HEADLESS,
+                args=chromium_launch_args(
+                    self._settings, url=url, pinned_address=pinned_address
+                ),
             )
             context = await browser.new_context(
                 viewport={"width": 1280, "height": 900},
@@ -576,6 +717,9 @@ class PlaywrightPersistentBrowserDriver:
             )
             page = await context.new_page()
             page.set_default_timeout(self._settings.APPLICATION_BROWSER_TIMEOUT_MS)
+            page.set_default_navigation_timeout(
+                self._settings.APPLICATION_BROWSER_TIMEOUT_MS
+            )
             handle = _PlaywrightHandle(playwright, browser, context, page, policy)
             await page.route("**/*", handle.guard_route)
             try:

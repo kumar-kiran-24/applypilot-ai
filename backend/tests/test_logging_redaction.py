@@ -20,9 +20,7 @@ def _record(message: str, *args: object) -> logging.LogRecord:
 
 
 def test_filter_redacts_oauth_query_values() -> None:
-    record = _record(
-        'GET /api/v1/gmail/callback?code=4/0AbCdEf&state=secret-state HTTP/1.1" 200'
-    )
+    record = _record('GET /api/v1/gmail/callback?code=4/0AbCdEf&state=secret-state HTTP/1.1" 200')
 
     assert RedactingFilter().filter(record) is True
 
@@ -34,9 +32,7 @@ def test_filter_redacts_oauth_query_values() -> None:
 
 
 def test_filter_redacts_tokens_in_lower_and_upper_case() -> None:
-    record = _record(
-        "callback?ACCESS_TOKEN=ya29.value&refresh_token=1//value&id_token=eyJ.value"
-    )
+    record = _record("callback?ACCESS_TOKEN=ya29.value&refresh_token=1//value&id_token=eyJ.value")
 
     RedactingFilter().filter(record)
     rendered = record.getMessage()
@@ -59,6 +55,28 @@ def test_filter_redacts_percent_formatted_messages() -> None:
     assert "one-time-code" not in rendered
     assert "127.0.0.1:5000" in rendered
     assert "code=[REDACTED]" in rendered
+
+
+def test_filter_redacts_single_use_view_tickets_and_other_secrets() -> None:
+    record = _record('GET /api/v1/browser-sessions/view/ws?ticket=secret-ticket HTTP/1.1" 101')
+
+    RedactingFilter().filter(record)
+    rendered = record.getMessage()
+
+    assert "secret-ticket" not in rendered
+    assert "ticket=[REDACTED]" in rendered
+
+
+def test_structured_ticket_fields_are_redacted() -> None:
+    from app.core.logging import JsonFormatter
+
+    record = _record("view opened")
+    record.ticket = "secret-ticket"
+
+    payload = JsonFormatter().format(record)
+
+    assert "secret-ticket" not in payload
+    assert "[REDACTED]" in payload
 
 
 def test_filter_leaves_ordinary_messages_unchanged() -> None:

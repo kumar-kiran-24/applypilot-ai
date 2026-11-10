@@ -1,10 +1,13 @@
-"""Application workflow: analyse, prepare, approve, submit and track.
+"""Application workflow: analyse, prepare, approve, hand off and track.
 
-The service enforces the guarantees of Phase 2:
+The service enforces the guarantees of Phase 2 and Stage G:
 
-* nothing is submitted without an explicit, current user approval;
+* ApplyPilot never performs the final submission and has no click/submit
+  browser primitive; the user submits on the employer's page;
+* an approved application only reaches a manual handoff, never ``SUBMITTED``;
+* ``SUBMITTED`` is recorded solely by an explicit ``confirmed=true`` user
+  confirmation with optional sanitised evidence;
 * a change to any answer or to the selected resume invalidates that approval;
-* unsupported platforms never pretend to have submitted anything;
 * passwords, OTPs, MFA codes, CAPTCHA answers and session cookies are never
   read, stored or logged. When a human step is required the application moves
   to ``needs_user_action`` instead.
@@ -12,20 +15,16 @@ The service enforces the guarantees of Phase 2:
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import hashlib
 import json
-import os
-import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -71,6 +70,7 @@ from app.services.application_state import (
     ApplicationStateError,
     transition,
 )
+from app.services.application_url_security import sanitize_url_for_display
 from app.services.candidate_service import CandidateService, is_forbidden_answer_storage
 from app.services.job_service import JobService
 from app.services.matching_service import MatchingService
@@ -246,7 +246,26 @@ class ApplicationService:
         # seconds, and an interrupted run leaves a recoverable ANALYZING row
         # instead of a half-updated review.
         transition(application, ApplicationStatus.ANALYZING)
-        await self.session.commit()
+        try:
+            await self.session.commit()
+        except IntegrityError:
+            # Two concurrent requests can both observe "no application yet" and
+            # race on the unique (user_id, job_id) constraint. The winner has
+            # already committed; adopt its row instead of returning a 500 or
+            # creating a duplicate application.
+            await self.session.rollback()
+            existing = await self._find_for_job(user, job_id)
+            if existing is None:  # pragma: no cover - defensive
+                raise
+            logger.info(
+                "Concurrent application preparation detected",
+                extra={
+                    "stage": "application_analyze_conflict",
+                    "user_id": str(user.id),
+                    "application_id": str(existing.id),
+                },
+            )
+            return await self.get_application(user, existing.id)
 
         inspection, inspection_note = await self._inspect(adapter, detection, user)
 
@@ -808,7 +827,6 @@ class ApplicationService:
                     "questions": [self._question_payload(item) for item in rows],
                 }
             )
-        manual = application.automation_mode is not AutomationMode.AUTOMATED
         ready_to_approve = not missing and application.resume_id is not None
         return {
             "application_id": application.id,
@@ -853,8 +871,8 @@ class ApplicationService:
                 and application.approval_fingerprint
                 == approval_fingerprint(application, questions)
             ),
-            "submission_mode": "manual" if manual else "automated",
-            "manual_steps": list(MANUAL_STEPS) if manual else [],
+            "submission_mode": "manual",
+            "manual_steps": list(MANUAL_STEPS),
             "warnings": self._warnings(application, missing),
         }
 
@@ -893,11 +911,10 @@ class ApplicationService:
                 "This employer may require an account. Create it yourself; ApplyPilot "
                 "never stores company passwords or completes verification for you."
             )
-        if application.automation_mode is not AutomationMode.AUTOMATED:
-            warnings.append(
-                "ApplyPilot will not submit this form. You will complete the final "
-                "submission on the employer's site."
-            )
+        warnings.append(
+            "ApplyPilot never clicks Submit, Apply or Finish. You complete the "
+            "final submission on the employer's site."
+        )
         if missing:
             warnings.append(
                 f"{len(missing)} required question"
@@ -955,8 +972,10 @@ class ApplicationService:
         application = await self.get_application(user, application_id, lock=True)
         if application.status is not ApplicationStatus.AWAITING_APPROVAL:
             if application.status is ApplicationStatus.SUBMITTING:
+                # Legacy records from the removed automated flow; still treated
+                # as mid-submission so a retry can never submit twice.
                 raise ApplicationStateError(
-                    "This application is already being submitted. A retry cannot "
+                    "This application is already being processed. A retry cannot "
                     "submit it twice.",
                     code="submission_in_progress",
                 )
@@ -976,7 +995,7 @@ class ApplicationService:
                 )
             if application.status is ApplicationStatus.FAILED:
                 raise ApplicationStateError(
-                    "The automated submission failed. Complete the application "
+                    "The previous attempt failed. Complete the application "
                     "manually or prepare it again.",
                     code="submission_failed",
                 )
@@ -1000,122 +1019,17 @@ class ApplicationService:
                 code="resume_required",
             )
 
-        if application.automation_mode is not AutomationMode.AUTOMATED:
-            return await self._finish_manual(application, reason=None)
-
-        transition(application, ApplicationStatus.SUBMITTING)
-        application.failure_reason = None
-        await self.session.commit()
-
-        try:
-            return await self._submit_automated(user, application)
-        except BrowserUnavailableError as exc:
-            return await self._finish_manual(application, reason=str(exc))
-        except ManualInterventionRequired as exc:
-            logger.info(
-                "Manual intervention required during submission",
-                extra={
-                    "stage": "application_submit",
-                    "application_id": str(application.id),
-                    "reason_code": exc.step,
-                },
-            )
-            return await self._finish_manual(application, reason=exc.reason)
-        except ApplicationStateError:
-            raise
-        except Exception as exc:  # pragma: no cover - live browser failures
-            logger.warning(
-                "Application submission failed",
-                extra={
-                    "stage": "application_submit",
-                    "application_id": str(application.id),
-                    "error_class": type(exc).__name__,
-                },
-            )
-            transition(application, ApplicationStatus.FAILED)
-            application.failure_reason = (
-                "Automation could not complete the submission. No application was "
-                "confirmed by the employer; finish it manually."
-            )
-            application.automation_details = {"error_class": type(exc).__name__}
-            await self.session.commit()
-            raise ApplicationStateError(
-                "The automated submission failed. Complete the application manually.",
-                code="submission_failed",
-            ) from exc
-
-    async def _submit_automated(
-        self, user: User, application: Application
-    ) -> SubmissionOutcome:
-        adapter, detection = adapter_for_url(application.application_url)
-        if not adapter.supports_automation:
-            return await self._finish_manual(application, reason=None)
-
-        _, data = await self.resumes.read_file(user, application.resume_id)
-        extension = ".pdf"
-        handle, temp_path = tempfile.mkstemp(prefix="applypilot-", suffix=extension)
-        os.close(handle)
-        try:
-            await asyncio.to_thread(Path(temp_path).write_bytes, data)
-            async with PlaywrightBrowser(settings).open(
-                detection.application_url, user_id=str(user.id)
-            ) as session:
-                inspection = await adapter.inspect_application(
-                    detection.application_url,
-                    session,
-                    max_fields=settings.APPLICATION_MAX_FORM_FIELDS,
-                )
-                fields = adapter.extract_form_fields(inspection)
-                values = {
-                    question.question_key: question.answer or ""
-                    for question in application.questions
-                    if question.status is QuestionStatus.CONFIRMED and question.answer
-                }
-                fill = await adapter.fill_supported_fields(session, fields, values)
-                upload = await adapter.upload_resume(
-                    session, temp_path, application.resume_filename
-                )
-                validation = await adapter.validate_application(session)
-                if not validation.valid:
-                    transition(application, ApplicationStatus.FAILED)
-                    application.failure_reason = (
-                        "The employer's form reported validation errors. Review and "
-                        "submit it manually."
-                    )
-                    application.automation_details = {
-                        "validation_errors": list(validation.errors)[:5],
-                        "filled_fields": len(fill.filled),
-                    }
-                    await self.session.commit()
-                    raise ApplicationStateError(
-                        "The form reported validation errors. Complete it manually.",
-                        code="validation_failed",
-                    )
-                report = await adapter.submit_application(session)
-        finally:
-            with contextlib.suppress(OSError):
-                os.unlink(temp_path)
-
-        if not report.submitted:
-            return await self._finish_manual(application, reason=report.reason)
-
-        transition(application, ApplicationStatus.SUBMITTED)
-        application.stage = ApplicationStage.APPLIED
-        application.submitted_at = _utcnow()
-        application.submission_reference = report.reference
-        application.failure_reason = None
-        application.automation_details = {
-            "filled_fields": len(fill.filled),
-            "resume_uploaded": upload.uploaded,
-            "evidence": report.evidence,
-        }
-        await self.session.commit()
-        return SubmissionOutcome(
-            submitted=True,
-            manual_required=False,
-            message="The employer's confirmation was detected. Application submitted.",
-            reference=report.reference,
+        # Stage G: the approved application is handed off, never submitted.
+        # There is intentionally no browser fill/click path here. The user
+        # completes the employer's form and records it with /mark-submitted.
+        logger.info(
+            "Application handed off for manual submission",
+            extra={
+                "stage": "application_submit_handoff",
+                "application_id": str(application.id),
+            },
         )
+        return await self._finish_manual(application, reason=None)
 
     async def _finish_manual(
         self, application: Application, *, reason: str | None
@@ -1143,21 +1057,73 @@ class ApplicationService:
         )
 
     async def confirm_manual_submission(
-        self, user: User, application_id: UUID, *, reference: str | None
+        self,
+        user: User,
+        application_id: UUID,
+        *,
+        reference: str | None,
+        confirmed: bool = False,
+        confirmation_url: str | None = None,
+        confirmation_message: str | None = None,
     ) -> Application:
+        """Record a user-confirmed manual submission with explicit evidence.
+
+        A status change, navigation or a form that disappeared is never enough.
+        The caller must send ``confirmed=true``. Optional evidence (reference,
+        sanitised confirmation URL, short employer message) is stored so the
+        user can distinguish "I confirmed it" from "the employer confirmed it".
+        """
+        if confirmed is not True:
+            raise ApplicationStateError(
+                "Confirm that you completed the submission on the employer's "
+                "site before recording it.",
+                code="submission_not_confirmed",
+            )
         application = await self.get_application(user, application_id)
         if application.status not in {
+            ApplicationStatus.READY_FOR_REVIEW,
+            ApplicationStatus.AWAITING_APPROVAL,
             ApplicationStatus.NEEDS_USER_ACTION,
             ApplicationStatus.FAILED,
         }:
             raise ApplicationStateError(
-                "Only an application awaiting manual submission can be confirmed."
+                "This application cannot be confirmed as submitted in its "
+                "current state.",
+                code="submission_confirmation_not_allowed",
             )
+
+        confirmed_at = _utcnow()
+        cleaned_reference = (reference or "").strip()[:255] or None
+        # Query strings can carry one-time tokens, so only origin + path is kept.
+        safe_url = sanitize_url_for_display((confirmation_url or "").strip()) or None
+        message = (confirmation_message or "").strip()[:2000] or None
+
         transition(application, ApplicationStatus.SUBMITTED)
         application.stage = ApplicationStage.APPLIED
-        application.submitted_at = _utcnow()
-        application.submission_reference = (reference or "").strip()[:255] or None
+        application.submitted_at = confirmed_at
+        application.submission_reference = cleaned_reference
+        application.failure_reason = None
+        details = dict(application.automation_details or {})
+        details["submission_confirmation"] = {
+            "confirmed_by_user": True,
+            "confirmed_at": confirmed_at.isoformat(),
+            "reference": cleaned_reference,
+            "confirmation_url": safe_url,
+            "confirmation_message": message,
+        }
+        application.automation_details = details
         await self.session.commit()
+        logger.info(
+            "Manual submission confirmed by user",
+            extra={
+                "stage": "application_submission_confirmed",
+                "user_id": str(user.id),
+                "application_id": str(application.id),
+                "has_reference": cleaned_reference is not None,
+                "has_confirmation_url": safe_url is not None,
+                "has_confirmation_message": message is not None,
+            },
+        )
         return await self.get_application(user, application.id)
 
     async def update_stage(

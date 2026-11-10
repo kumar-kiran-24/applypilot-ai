@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from app.core.config import settings
 from app.core.security import create_access_token
-from app.models.application import Application, ApplicationStatus
+from app.models.application import Application, ApplicationStatus, AutomationMode
 from app.models.candidate import Candidate
 from app.models.job import Job
 from app.models.resume import Resume, ResumeParsingStatus
@@ -388,7 +388,7 @@ async def test_application_workflow_with_manual_submission(
 
     confirmed = await client.post(
         f"{APPLICATIONS}/{application_id}/mark-submitted",
-        json={"reference": "APP-123"},
+        json={"reference": "APP-123", "confirmed": True},
         headers=headers,
     )
     assert confirmed.status_code == 200, confirmed.text
@@ -672,7 +672,7 @@ async def test_submitted_application_cannot_be_resubmitted_or_cancelled(
 
     confirmed = await client.post(
         f"{APPLICATIONS}/{application_id}/mark-submitted",
-        json={"reference": "APP-1"},
+        json={"reference": "APP-1", "confirmed": True},
         headers=headers,
     )
     assert confirmed.status_code == 200, confirmed.text
@@ -701,6 +701,115 @@ async def test_submitted_application_cannot_be_resubmitted_or_cancelled(
     ).status_code == 409
 
 
+# ---------------------------------------------------------------------------
+# Stage G: submission policy
+# ---------------------------------------------------------------------------
+async def test_approved_application_never_reaches_automated_submission(
+    client: AsyncClient, session_factory: SessionFactory
+) -> None:
+    """Even an AUTOMATED record is handed off; nothing clicks the final button."""
+    user = await create_user(session_factory)
+    job = await create_job(session_factory, user)
+    await create_resume(session_factory, user)
+    await prepare_profile(client, user)
+    headers = bearer(user)
+
+    preview = (
+        await client.post(
+            f"{APPLICATIONS}/analyze",
+            json={
+                "job_id": str(job.id),
+                "application_url": "https://boards.greenhouse.io/acme/jobs/1",
+            },
+            headers=headers,
+        )
+    ).json()
+    application_id = preview["application_id"]
+
+    for section in preview["sections"]:
+        for question in section["questions"]:
+            if not question["required"] or question["status"] == "confirmed":
+                continue
+            value = question["answer"] or (
+                "No" if question["question_key"] == "authorization.sponsorship" else "Yes"
+            )
+            response = await client.patch(
+                f"{APPLICATIONS}/{application_id}/questions/{question['id']}",
+                json={"answer": value, "confirmed": True},
+                headers=headers,
+            )
+            assert response.status_code == 200, response.text
+
+    # Force the legacy automated mode so this test fails if the click path returns.
+    async with session_factory() as session:
+        row = await session.get(Application, uuid.UUID(application_id))
+        assert row is not None
+        row.automation_mode = AutomationMode.AUTOMATED
+        await session.commit()
+
+    approved = await client.post(
+        f"{APPLICATIONS}/{application_id}/approve",
+        json={"approved": True},
+        headers=headers,
+    )
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["can_submit"] is True
+    assert approved.json()["submission_mode"] == "manual"
+
+    handed_off = await client.post(
+        f"{APPLICATIONS}/{application_id}/submit", headers=headers
+    )
+    assert handed_off.status_code == 200, handed_off.text
+    outcome = handed_off.json()
+    assert outcome["submitted"] is False
+    assert outcome["manual_required"] is True
+    assert outcome["reference"] is None
+    assert outcome["steps"]
+    assert "No application was submitted by ApplyPilot" in outcome["message"]
+    assert outcome["application"]["status"] == "needs_user_action"
+    assert outcome["application"]["submitted_at"] is None
+    assert outcome["application"]["submission_reference"] is None
+
+    # Repeating the handoff cannot reach the employer either.
+    again = await client.post(f"{APPLICATIONS}/{application_id}/submit", headers=headers)
+    assert again.status_code == 409
+
+    # Only the explicit user confirmation records SUBMITTED.
+    confirmed = await client.post(
+        f"{APPLICATIONS}/{application_id}/mark-submitted",
+        json={"reference": "APP-G1", "confirmed": True},
+        headers=headers,
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["status"] == "submitted"
+
+
+def test_no_submit_or_click_primitive_remains() -> None:
+    """Stage G removed every browser/adapter primitive that could submit."""
+    from app.integrations.browser.playwright_driver import PlaywrightSession
+    from app.integrations.browser.session import AutomationSession
+    from app.services.application_adapters import (
+        FormSelectors,
+        get_adapter,
+    )
+    from app.services.application_platforms import ApplicationPlatform
+
+    assert "submit" not in PlaywrightSession.__dict__
+    assert not hasattr(AutomationSession, "submit")
+    assert "submit" not in FormSelectors.__dataclass_fields__
+
+    for platform in (
+        ApplicationPlatform.GREENHOUSE,
+        ApplicationPlatform.LEVER,
+        ApplicationPlatform.ASHBY,
+        ApplicationPlatform.SMARTRECRUITERS,
+        ApplicationPlatform.WORKDAY,
+        ApplicationPlatform.ICIMS,
+        ApplicationPlatform.COMPANY_HOSTED,
+    ):
+        assert not hasattr(get_adapter(platform), "submit_application")
+
+
 async def test_application_being_submitted_cannot_be_submitted_again(
     client: AsyncClient, session_factory: SessionFactory
 ) -> None:
@@ -727,3 +836,50 @@ async def test_application_being_submitted_cannot_be_submitted_again(
     retried = await client.post(f"{APPLICATIONS}/{application_id}/submit", headers=headers)
     assert retried.status_code == 409
     assert retried.json()["code"] == "submission_in_progress"
+
+
+async def test_concurrent_preparation_reuses_the_existing_application(
+    client: AsyncClient,
+    session_factory: SessionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A duplicate concurrent analyze request must not create a second row.
+
+    Two requests can both read "no application for this job" before either
+    commits. The unique (user_id, job_id) constraint rejects the loser; the
+    service must adopt the winner's row instead of returning a 500.
+    """
+    from app.services.application_service import ApplicationService
+
+    user = await create_user(session_factory)
+    job = await create_job(session_factory, user)
+    await create_resume(session_factory, user)
+    await prepare_profile(client, user)
+
+    first = await client.post(
+        f"{APPLICATIONS}/analyze", json={"job_id": str(job.id)}, headers=bearer(user)
+    )
+    assert first.status_code == 200, first.text
+    application_id = first.json()["application_id"]
+
+    original = ApplicationService._find_for_job
+    calls = {"count": 0}
+
+    async def stale_lookup(self: ApplicationService, owner: User, job_id: uuid.UUID):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            # The racing request had not committed its insert yet.
+            return None
+        return await original(self, owner, job_id)
+
+    monkeypatch.setattr(ApplicationService, "_find_for_job", stale_lookup)
+
+    async with session_factory() as session:
+        application = await ApplicationService(session).analyze_job(user, job.id)
+
+    assert str(application.id) == application_id
+    assert calls["count"] == 2
+
+    async with session_factory() as session:
+        rows = await ApplicationService(session).list_applications(user)
+    assert len(rows) == 1

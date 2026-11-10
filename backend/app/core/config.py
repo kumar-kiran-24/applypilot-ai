@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     ENVIRONMENT: Environment = "development"
     DEBUG: bool = False
     API_V1_PREFIX: str = "/api/v1"
+    # Interactive API documentation. ``None`` means "enabled outside
+    # production"; production always disables /docs, /redoc and /openapi.json
+    # because they describe internal endpoints to unauthenticated visitors.
+    API_DOCS_ENABLED: bool | None = None
 
     # --- Infrastructure ------------------------------------------------------
     DATABASE_URL: str = DEV_DATABASE_URL
@@ -112,6 +116,28 @@ class Settings(BaseSettings):
     # Only one live browser per user by default: a second session would let the
     # same candidate fill two forms in parallel from one profile.
     APPLICATION_BROWSER_MAX_ACTIVE_PER_USER: int = Field(default=1, ge=1, le=5)
+    # Process-wide ceiling. Each Chromium is several hundred MB, so this is the
+    # real capacity limit on a single host; new sessions get a 503 when full
+    # instead of the host running out of memory.
+    APPLICATION_MAX_ACTIVE_BROWSER_SESSIONS: int = Field(default=8, ge=1, le=100)
+    # Per-renderer V8 heap ceiling. Chromium pads this, so the process may use
+    # somewhat more; pair it with a systemd MemoryMax (see the deploy units).
+    APPLICATION_BROWSER_JS_HEAP_MB: int = Field(default=512, ge=128, le=4096)
+    # Pin the validated DNS answer for the employer host into Chromium's
+    # resolver, closing the validate-then-resolve (rebinding) gap. Must stay on
+    # in production.
+    APPLICATION_BROWSER_PIN_DNS: bool = True
+    # Phase 2E Stage E: stream the same persistent Playwright page to the owning
+    # user over an authenticated, single-use-ticket WebSocket. No CDP port is
+    # exposed; frames and narrowly validated input are relayed in-process.
+    APPLICATION_BROWSER_STREAMING_ENABLED: bool = True
+    APPLICATION_BROWSER_VIEW_TICKET_TTL_SECONDS: int = Field(default=45, ge=10, le=120)
+    # View tickets are single use. Limiting issuance prevents ticket farming.
+    APPLICATION_BROWSER_VIEW_TICKETS_PER_MINUTE: int = Field(default=6, ge=1, le=60)
+    # Forwarded mouse/key/text events per live view, per second.
+    APPLICATION_BROWSER_VIEW_INPUT_PER_SECOND: int = Field(default=120, ge=10, le=600)
+    # A view is closed (but the browser is not cancelled) after this long.
+    APPLICATION_BROWSER_VIEW_MAX_SECONDS: int = Field(default=3600, ge=60, le=7200)
     # Extra exact origins the operator trusts for employer redirects (for
     # example a corporate SSO domain). Environment format: comma-separated or
     # a JSON array, e.g. "https://login.acme.com".
@@ -139,6 +165,28 @@ class Settings(BaseSettings):
     # Lifetime of a one-time login code. Deliberately short (<= 60 seconds):
     # it only has to survive the browser redirect from the API to the app.
     AUTH_CODE_EXPIRE_SECONDS: int = Field(default=60, ge=10, le=60)
+    # Per-client-address limit for the public auth endpoints (OAuth start,
+    # callback and code exchange). This is an in-process safety net behind the
+    # reverse proxy's limit_req; it is not a distributed quota.
+    AUTH_RATE_LIMIT_PER_MINUTE: int = Field(default=30, ge=1, le=600)
+    # Per-principal limit for every other API route (authenticated calls are
+    # keyed by user id, anonymous ones by client address). In-process, so it is
+    # a per-worker budget, not a cluster quota; Nginx limit_req is the edge
+    # control. Health, readiness and metrics are excluded.
+    API_RATE_LIMIT_ENABLED: bool = True
+    API_RATE_LIMIT_PER_MINUTE: int = Field(default=240, ge=10, le=10_000)
+
+    # --- Observability -------------------------------------------------------
+    # Prometheus text exposition at /api/v1/metrics. In production a bearer
+    # token is required (METRICS_TOKEN); the reverse proxy should also restrict
+    # the route to the monitoring network.
+    METRICS_ENABLED: bool = True
+    METRICS_TOKEN: str | None = None
+    # Optional JSON webhook for unhandled errors (error tracking without a
+    # vendor SDK). Payloads contain the error class, path, request id and
+    # status - never a message, token, cookie or form value.
+    ERROR_WEBHOOK_URL: str | None = None
+    ERROR_WEBHOOK_TIMEOUT_SECONDS: float = Field(default=3.0, ge=0.5, le=10)
 
     # --- CORS ----------------------------------------------------------------
     BACKEND_CORS_ORIGINS: list[str] = Field(
@@ -153,6 +201,13 @@ class Settings(BaseSettings):
     @property
     def is_testing(self) -> bool:
         return self.ENVIRONMENT == "testing"
+
+    @property
+    def docs_enabled(self) -> bool:
+        """Interactive docs are opt-in in production, opt-out elsewhere."""
+        if self.API_DOCS_ENABLED is None:
+            return not self.is_production
+        return self.API_DOCS_ENABLED
 
     @property
     def session_cookie_https_only(self) -> bool:
@@ -189,6 +244,34 @@ class Settings(BaseSettings):
                 return value
             return [origin.strip() for origin in raw.split(",") if origin.strip()]
         return value
+
+    @field_validator("METRICS_TOKEN")
+    @classmethod
+    def _validate_metrics_token(cls, value: str | None) -> str | None:
+        """Require a real secret when the metrics endpoint is token-protected."""
+        if value is None or not value.strip():
+            return None
+        candidate = value.strip()
+        if len(candidate) < 24:
+            msg = "METRICS_TOKEN must be at least 24 characters long."
+            raise ValueError(msg)
+        return candidate
+
+    @field_validator("ERROR_WEBHOOK_URL")
+    @classmethod
+    def _validate_error_webhook(cls, value: str | None) -> str | None:
+        """Accept only an absolute http(s) webhook URL without credentials."""
+        if value is None or not value.strip():
+            return None
+        candidate = value.strip()
+        parts = urlsplit(candidate)
+        if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+            msg = "ERROR_WEBHOOK_URL must be an absolute http(s) URL."
+            raise ValueError(msg)
+        if parts.username is not None or parts.password is not None:
+            msg = "ERROR_WEBHOOK_URL must not contain credentials."
+            raise ValueError(msg)
+        return candidate
 
     @field_validator("RESUME_STORAGE_DIR")
     @classmethod
@@ -317,8 +400,26 @@ class Settings(BaseSettings):
                 problems.append("DATABASE_URL must not use the development default")
             if self.DEBUG:
                 problems.append("DEBUG must be false in production")
+            if not self.BACKEND_CORS_ORIGINS:
+                problems.append(
+                    "BACKEND_CORS_ORIGINS must list the deployed frontend origin(s)"
+                )
             if "*" in self.BACKEND_CORS_ORIGINS:
                 problems.append("BACKEND_CORS_ORIGINS must not allow '*' in production")
+            for origin in self.BACKEND_CORS_ORIGINS:
+                parts = urlsplit(origin)
+                if parts.scheme.lower() != "https" or not parts.hostname:
+                    problems.append(
+                        "BACKEND_CORS_ORIGINS entries must be absolute https origins "
+                        "in production"
+                    )
+                    break
+                if parts.hostname.lower() in {"localhost", "127.0.0.1", "::1"}:
+                    problems.append(
+                        "BACKEND_CORS_ORIGINS must not use a loopback host in "
+                        "production"
+                    )
+                    break
             if not self.GMAIL_TOKEN_ENCRYPTION_KEY:
                 problems.append(
                     "GMAIL_TOKEN_ENCRYPTION_KEY must be configured in production"
@@ -327,6 +428,33 @@ class Settings(BaseSettings):
                 problems.append("GMAIL_REDIRECT_URI must be configured in production")
             elif urlsplit(self.GMAIL_REDIRECT_URI).scheme.lower() != "https":
                 problems.append("GMAIL_REDIRECT_URI must use https in production")
+            if self.docs_enabled:
+                problems.append(
+                    "API_DOCS_ENABLED must be false in production: /docs, /redoc "
+                    "and /openapi.json must not be public"
+                )
+            if not self.API_RATE_LIMIT_ENABLED:
+                problems.append(
+                    "API_RATE_LIMIT_ENABLED must not be disabled in production"
+                )
+            if not self.APPLICATION_BROWSER_PIN_DNS:
+                problems.append(
+                    "APPLICATION_BROWSER_PIN_DNS must not be disabled in production"
+                )
+            if self.METRICS_ENABLED and not self.METRICS_TOKEN:
+                problems.append(
+                    "METRICS_TOKEN must be configured when METRICS_ENABLED is true "
+                    "in production"
+                )
+            if self.OAUTH_SESSION_SECRET == self.JWT_SECRET_KEY:
+                problems.append(
+                    "OAUTH_SESSION_SECRET must differ from JWT_SECRET_KEY"
+                )
+            if (
+                self.ERROR_WEBHOOK_URL
+                and urlsplit(self.ERROR_WEBHOOK_URL).scheme.lower() != "https"
+            ):
+                problems.append("ERROR_WEBHOOK_URL must use https in production")
 
         if self.GMAIL_FRONTEND_REDIRECT_URI:
             if (

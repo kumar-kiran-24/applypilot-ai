@@ -29,6 +29,8 @@ def production_settings(**overrides: Any) -> Settings:
         "GMAIL_TOKEN_ENCRYPTION_KEY": VALID_KEY,
         "GMAIL_REDIRECT_URI": "https://api.example.com/api/v1/gmail/callback",
         "AUTH_FRONTEND_REDIRECT_URI": "https://app.example.com/auth/callback",
+        # Production requires a token whenever metrics are enabled (the default).
+        "METRICS_TOKEN": "m" * 32,
     }
     values.update(overrides)
     return Settings(**values)

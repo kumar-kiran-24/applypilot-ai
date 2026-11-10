@@ -40,7 +40,9 @@ class AutomationSession(Protocol):
     """Operations an adapter may perform inside one browser session.
 
     Implementations must never accept or return passwords, OTPs, MFA codes or
-    CAPTCHA solutions, and must clean up the browser when the session ends.
+    CAPTCHA solutions, must clean up the browser when the session ends, and
+    expose no submit/click primitive: the final application action belongs to
+    the user on the employer's page.
     """
 
     async def inspect(self, selectors: object) -> tuple[list[RawFormField], bool]:
@@ -57,18 +59,6 @@ class AutomationSession(Protocol):
 
     async def validation_errors(self, selectors: object) -> list[str]:
         """Return text of client-side validation errors currently shown."""
-        ...
-
-    async def submit(self, selectors: object) -> None:
-        """Submit the form that is already filled and validated."""
-        ...
-
-    async def confirmation_reference(self, selector: str) -> str | None:
-        """Best-effort, non-secret reference from the confirmation page."""
-        ...
-
-    async def screenshot(self) -> str | None:
-        """Capture a masked debugging screenshot and return its filename."""
         ...
 
 

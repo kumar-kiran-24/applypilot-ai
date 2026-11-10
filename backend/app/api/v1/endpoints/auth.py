@@ -14,7 +14,7 @@ Flow:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import urlencode, urlparse
 
 from authlib.integrations.base_client.errors import MismatchingStateError, OAuthError
@@ -25,8 +25,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.dependencies import get_authenticated_user
+from app.core.dependencies import get_access_claims, get_authenticated_user
 from app.core.logging import get_logger
+from app.core.rate_limit import enforce_rate_limit
 from app.core.security import create_access_token
 from app.db.session import get_db
 from app.models.user import User
@@ -39,6 +40,7 @@ from app.services.google_oauth import (
     google_redirect_uri,
     oauth,
 )
+from app.services.token_revocation import revoke_token
 
 logger = get_logger(__name__)
 
@@ -73,6 +75,24 @@ _AUTH_CODE_FAILURE_DETAILS = {
     AuthCodeFailure.expired: AUTH_CODE_EXPIRED_DETAIL,
     AuthCodeFailure.used: AUTH_CODE_USED_DETAIL,
 }
+
+
+def _auth_limiter(scope: str):
+    """Per-client-address limit for one step of the public login flow."""
+
+    async def dependency(request: Request) -> None:
+        await enforce_rate_limit(
+            request,
+            scope=scope,
+            limit=settings.AUTH_RATE_LIMIT_PER_MINUTE,
+        )
+
+    return dependency
+
+
+auth_login_rate_limit = _auth_limiter("auth_login")
+auth_callback_rate_limit = _auth_limiter("auth_callback")
+auth_exchange_rate_limit = _auth_limiter("auth_exchange")
 
 
 def _is_email_verified(value: Any) -> bool:
@@ -123,6 +143,7 @@ def _frontend_redirect(**params: str) -> RedirectResponse:
         "not Swagger UI's 'Execute' button, which performs a cross-origin fetch."
     ),
     status_code=status.HTTP_302_FOUND,
+    dependencies=[Depends(auth_login_rate_limit)],
 )
 async def google_login(request: Request):
     """Redirect the user to Google for authentication."""
@@ -164,7 +185,11 @@ async def google_login(request: Request):
         "callback with a single-use code. The ApplyPilot JWT is never rendered "
         "or placed in a URL."
     ),
-    responses={303: {"description": "Redirect to the frontend login callback"}},
+    responses={
+        303: {"description": "Redirect to the frontend login callback"},
+        429: {"description": "Too many attempts from this client"},
+    },
+    dependencies=[Depends(auth_callback_rate_limit)],
 )
 async def google_callback(
     request: Request,
@@ -299,7 +324,9 @@ async def google_callback(
         400: {"description": "Invalid, expired or already used code"},
         401: {"description": "The code's account is unavailable"},
         403: {"description": "The account is inactive"},
+        429: {"description": "Too many attempts from this client"},
     },
+    dependencies=[Depends(auth_exchange_rate_limit)],
 )
 async def exchange_login_code(
     payload: AuthCodeExchangeRequest,
@@ -367,3 +394,31 @@ async def get_current_user(
 ) -> dict[str, Any]:
     """Return the current authenticated user."""
     return _public_user(current_user)
+
+
+@router.post(
+    "/logout",
+    summary="Revoke the current access token",
+    description=(
+        "Revokes the presented access token immediately by recording its "
+        "``jti``. A stateless JWT would otherwise stay valid until it expired. "
+        "The frontend clears its HttpOnly cookie after this call; repeating it "
+        "is harmless."
+    ),
+    responses={401: {"description": "Missing, invalid or already revoked token"}},
+)
+async def logout(
+    claims: Annotated[dict[str, Any], Depends(get_access_claims)],
+    current_user: Annotated[User, Depends(get_authenticated_user)],
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Add the current token to the revocation denylist."""
+    jti = str(claims["jti"])
+    revoked = await revoke_token(
+        db, jti=jti, user_id=current_user.id, claims=claims
+    )
+    logger.info(
+        "User signed out",
+        extra={"stage": "logout", "user_id": str(current_user.id)},
+    )
+    return {"message": "Signed out.", "revoked": revoked}

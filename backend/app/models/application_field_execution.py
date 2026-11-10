@@ -59,8 +59,11 @@ class FieldExecutionStatus(str, Enum):
     PLANNED = "planned"
     RUNNING = "running"
     NEEDS_USER_INPUT = "needs_user_input"
+    WAITING_FOR_CONFIRMATION = "waiting_for_confirmation"
     PAUSED = "paused"
+    READY_FOR_FINAL_REVIEW = "ready_for_final_review"
     COMPLETED = "completed"
+    SESSION_EXPIRED = "session_expired"
     CANCELLED = "cancelled"
     FAILED = "failed"
 

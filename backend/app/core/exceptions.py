@@ -22,10 +22,13 @@ class AppError(Exception):
         *,
         code: str | None = None,
         details: list[dict[str, Any]] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         self.message = message or type(self).message
         self.code = code or type(self).code
         self.details = details or []
+        # Transport hints only (for example ``Retry-After``); never secrets.
+        self.headers = headers or {}
         super().__init__(self.message)
 
     def to_payload(self) -> dict[str, Any]:

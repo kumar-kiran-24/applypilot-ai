@@ -15,7 +15,7 @@ handled here.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
 from app.models.application import InspectionMode, QuestionType
@@ -107,29 +107,14 @@ class ValidationReport:
 
 
 @dataclass(frozen=True)
-class SubmissionReport:
-    """Outcome of one submission attempt."""
-
-    submitted: bool
-    reference: str | None = None
-    needs_manual_completion: bool = False
-    reason: str | None = None
-    evidence: dict[str, str] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
 class FormSelectors:
     """Platform-specific selectors used by the optional browser driver."""
 
     form: str = "form"
-    submit: str = "button[type=submit], input[type=submit]"
     resume_input: str = "input[type=file]"
     login_marker: str = (
         "input[type=password], a[href*='login'], a[href*='signin'], "
         "button:has-text('Sign in'), button:has-text('Create account')"
-    )
-    confirmation: str = (
-        "[role=alert], .confirmation, .success, h1, h2"
     )
     account_marker: str = (
         "a[href*='register'], a[href*='signup'], a[href*='create-account'], "
@@ -414,27 +399,6 @@ class ApplicationPlatformAdapter:
         errors = await session.validation_errors(self.selectors)
         return ValidationReport(valid=not errors, errors=tuple(errors))
 
-    async def submit_application(self, session: AutomationSession) -> SubmissionReport:
-        """Click submit only after the service has verified explicit approval."""
-        if not self.supports_automation:
-            return SubmissionReport(
-                submitted=False,
-                needs_manual_completion=True,
-                reason="This platform is completed manually by you.",
-            )
-        await session.submit(self.selectors)
-        reference = await session.confirmation_reference(self.selectors.confirmation)
-        screenshot = await session.screenshot()
-        evidence: dict[str, str] = {}
-        if screenshot:
-            evidence["screenshot"] = screenshot
-        return SubmissionReport(
-            submitted=True,
-            reference=reference,
-            reason="The employer's confirmation page was detected.",
-            evidence=evidence,
-        )
-
 
 class GreenhouseAdapter(ApplicationPlatformAdapter):
     """Greenhouse job-board forms."""
@@ -442,7 +406,6 @@ class GreenhouseAdapter(ApplicationPlatformAdapter):
     spec = _SPEC_BY_PLATFORM[ApplicationPlatform.GREENHOUSE]
     selectors = FormSelectors(
         form="#application_form, form[action*='applications'], form",
-        submit="#submit_app, button[type=submit], input[type=submit]",
         resume_input="input[type=file][name*='resume'], input[type=file]",
         login_marker="input[type=password]",
         account_marker="a[href*='create_account'], button:has-text('Create account')",
@@ -465,7 +428,6 @@ class LeverAdapter(ApplicationPlatformAdapter):
     spec = _SPEC_BY_PLATFORM[ApplicationPlatform.LEVER]
     selectors = FormSelectors(
         form="form#application-form, form.application-form, form",
-        submit="button[type=submit], input[type=submit]",
         resume_input="input[type=file][name*='resume'], input[type=file]",
         login_marker="input[type=password]",
     )
@@ -486,7 +448,6 @@ class AshbyAdapter(ApplicationPlatformAdapter):
     spec = _SPEC_BY_PLATFORM[ApplicationPlatform.ASHBY]
     selectors = FormSelectors(
         form="form",
-        submit="button[type=submit], input[type=submit]",
         resume_input="input[type=file]",
         login_marker="input[type=password]",
         account_marker="a[href*='signin'], a[href*='signup']",
@@ -500,7 +461,6 @@ class SmartRecruitersAdapter(ApplicationPlatformAdapter):
     spec = _SPEC_BY_PLATFORM[ApplicationPlatform.SMARTRECRUITERS]
     selectors = FormSelectors(
         form="form",
-        submit="button[type=submit], input[type=submit]",
         resume_input="input[type=file]",
         login_marker="input[type=password]",
         account_marker="a[href*='signup'], button:has-text('Create account')",
@@ -621,7 +581,6 @@ __all__ = [
     "ICIMSAdapter",
     "LeverAdapter",
     "SmartRecruitersAdapter",
-    "SubmissionReport",
     "UploadReport",
     "ValidationReport",
     "WorkdayAdapter",

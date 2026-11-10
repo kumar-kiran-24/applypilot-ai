@@ -202,7 +202,12 @@ class ApproveApplicationRequest(BaseModel):
 
 
 class SubmissionResponse(BaseModel):
-    """Result of a submission attempt (automated or manual)."""
+    """Result of preparing the final, user-performed submission.
+
+    Stage G removed automated final submission. ``manual_required`` is always
+    true and ``submitted`` stays false until the user records the result with
+    ``POST /applications/{id}/mark-submitted`` and ``confirmed: true``.
+    """
 
     submitted: bool
     manual_required: bool
@@ -213,9 +218,16 @@ class SubmissionResponse(BaseModel):
 
 
 class ConfirmManualSubmissionRequest(BaseModel):
-    """The user confirms they submitted on the employer's site."""
+    """The user confirms they submitted on the employer's site.
 
+    ``confirmed`` must be explicitly true. Navigation, a disappearing form or
+    a frontend status change is never treated as submission evidence.
+    """
+
+    confirmed: bool = False
     reference: str | None = Field(default=None, max_length=255)
+    confirmation_url: str | None = Field(default=None, max_length=1000)
+    confirmation_message: str | None = Field(default=None, max_length=2000)
 
 
 class UpdateStageRequest(BaseModel):

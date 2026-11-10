@@ -25,6 +25,7 @@ from sqlalchemy.orm import selectinload
 from app.core.config import settings
 from app.core.exceptions import AppError, InvalidOperationError, ResourceNotFoundError
 from app.core.logging import get_logger
+from app.integrations.browser.launch_policy import preferred_address
 from app.integrations.browser.persistent import PersistentBrowserHandle
 from app.integrations.browser.session import BrowserUnavailableError
 from app.integrations.browser.view import browser_view_capability
@@ -43,11 +44,12 @@ from app.services.application_service import ApplicationService
 from app.services.application_url_security import (
     HostResolver,
     UnsafeNavigationError,
-    ensure_public_destination,
     policy_for_detection,
     sanitize_url_for_display,
+    validate_application_destination,
 )
 from app.services.browser_session_manager import (
+    BrowserCapacityError,
     BrowserSessionConflictError,
     BrowserSessionManager,
     get_browser_session_manager,
@@ -88,6 +90,17 @@ class BrowserSessionUnavailableError(AppError):
     status_code = 503
     code = "browser_automation_unavailable"
     message = "Live browser automation is not available for this application."
+
+
+class BrowserSessionCapacityError(AppError):
+    """The host is running as many browsers as it is configured to allow."""
+
+    status_code = 503
+    code = "browser_capacity_reached"
+    message = (
+        "The server has reached its live browser capacity. Try again when an "
+        "open session has finished."
+    )
 
 
 class BrowserSessionConflict(AppError):
@@ -249,7 +262,16 @@ class BrowserSessionService:
                 await self._mark_expired(row, release=False)
 
         await self._enforce_user_session_limit(user, exclude=row.id if row else None)
-        await ensure_public_destination(application.application_url, resolver=self.resolver)
+        # Resolves and validates every address, then pins one into Chromium's
+        # resolver so the name cannot be rebound after validation.
+        _, addresses = await validate_application_destination(
+            application.application_url, resolver=self.resolver
+        )
+        pinned_address = (
+            preferred_address(addresses)
+            if settings.APPLICATION_BROWSER_PIN_DNS
+            else None
+        )
         policy = policy_for_detection(
             detection,
             extra_origins=tuple(settings.APPLICATION_BROWSER_ALLOWED_REDIRECT_ORIGINS),
@@ -295,7 +317,11 @@ class BrowserSessionService:
                 application_id=application.id,
                 url=application.application_url,
                 policy=policy,
+                pinned_address=pinned_address,
             )
+        except BrowserCapacityError as exc:
+            await self._mark_unavailable(row, str(exc))
+            raise BrowserSessionCapacityError(str(exc)) from exc
         except BrowserSessionConflictError as exc:
             await self.session.refresh(row)
             raise BrowserSessionConflict(str(exc), code="browser_session_conflict") from exc
@@ -590,6 +616,7 @@ class BrowserSessionService:
 __all__ = [
     "EXPIRED_MESSAGE",
     "FINALIZED_APPLICATION_STATES",
+    "BrowserSessionCapacityError",
     "BrowserSessionConflict",
     "BrowserSessionExpiredError",
     "BrowserSessionNotFoundError",

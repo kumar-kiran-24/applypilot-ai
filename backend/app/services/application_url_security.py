@@ -254,10 +254,14 @@ async def _resolve_host(host: str, port: int) -> list[str]:
     return await loop.run_in_executor(None, resolve)
 
 
-async def ensure_public_destination(
+async def validate_application_destination(
     url: str, *, resolver: HostResolver | None = None
-) -> str:
+) -> tuple[str, tuple[str, ...]]:
     """Validate a URL statically and confirm it resolves to public addresses.
+
+    Returns the normalised URL and every validated address. Callers that launch
+    Chromium pin one of these addresses into the browser's resolver, so the
+    name cannot be re-resolved to a private address after validation.
 
     Raises:
         UnsafeNavigationError: when the name cannot be resolved or any resolved
@@ -279,7 +283,7 @@ async def ensure_public_destination(
         pass
     else:
         # An IP literal was already validated by normalize_application_url.
-        return normalized
+        return normalized, (host,)
 
     resolver = resolver or _resolve_host
     try:
@@ -299,6 +303,18 @@ async def ensure_public_destination(
             "The application host resolved to a private or internal address.",
             code="unsafe_application_host",
         )
+    return normalized, tuple(dict.fromkeys(addresses))
+
+
+async def ensure_public_destination(
+    url: str, *, resolver: HostResolver | None = None
+) -> str:
+    """Validate that a URL is a public destination; return it normalised.
+
+    Kept for callers that only need the gate; new code should use
+    :func:`validate_application_destination` when it also needs the address.
+    """
+    normalized, _ = await validate_application_destination(url, resolver=resolver)
     return normalized
 
 
@@ -312,4 +328,5 @@ __all__ = [
     "ensure_public_destination",
     "policy_for_detection",
     "sanitize_url_for_display",
+    "validate_application_destination",
 ]

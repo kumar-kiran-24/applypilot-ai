@@ -5,11 +5,16 @@ are not declared below. Keeping the rules in one place makes it impossible to
 edit a submitted application, re-submit an approved one twice or skip approval:
 
     DRAFT -> ANALYZING -> AWAITING_USER_INFORMATION <-> READY_FOR_REVIEW
-                        -> AWAITING_APPROVAL -> SUBMITTING -> SUBMITTED
-                                             \\-> NEEDS_USER_ACTION
+                        -> AWAITING_APPROVAL -> NEEDS_USER_ACTION -> SUBMITTED
+                                             \\-> SUBMITTED (user confirmed)
     FAILED and NEEDS_USER_ACTION can be recovered by preparing the application
-    again; SUBMITTED and SUBMITTING cannot be cancelled because the employer may
-    already have received the application.
+    again; SUBMITTED cannot be cancelled because the employer may already have
+    received the application.
+
+    ``SUBMITTING`` remains a declared status for records created by the earlier
+    automated-submission flow. Nothing in this codebase transitions into it any
+    more: ApplyPilot never clicks the final Submit/Apply/Finish control, and
+    ``SUBMITTED`` is only reachable through explicit user confirmation.
 """
 
 from __future__ import annotations
@@ -57,6 +62,10 @@ ALLOWED_TRANSITIONS: dict[ApplicationStatus, frozenset[ApplicationStatus]] = {
             ApplicationStatus.ANALYZING,
             ApplicationStatus.AWAITING_USER_INFORMATION,
             ApplicationStatus.AWAITING_APPROVAL,
+            # The user may finish and submit on the employer's page without
+            # asking ApplyPilot to submit; that explicit confirmation is
+            # evidence, not an automated submission.
+            ApplicationStatus.SUBMITTED,
             ApplicationStatus.CANCELLED,
         }
     ),
@@ -66,6 +75,7 @@ ALLOWED_TRANSITIONS: dict[ApplicationStatus, frozenset[ApplicationStatus]] = {
             ApplicationStatus.AWAITING_USER_INFORMATION,
             ApplicationStatus.READY_FOR_REVIEW,
             ApplicationStatus.SUBMITTING,
+            ApplicationStatus.SUBMITTED,
             ApplicationStatus.NEEDS_USER_ACTION,
             ApplicationStatus.CANCELLED,
         }

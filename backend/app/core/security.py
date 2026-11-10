@@ -64,7 +64,8 @@ def decode_access_token(token: str, *, settings: Settings | None = None) -> dict
             token,
             cfg.JWT_SECRET_KEY,
             algorithms=[cfg.JWT_ALGORITHM],
-            options={"require": ["exp", "sub"]},
+            # ``jti`` is required so logout can revoke exactly one token.
+            options={"require": ["exp", "sub", "jti"]},
         )
     except jwt.PyJWTError as exc:  # pragma: no cover - exact class varies by version
         raise TokenError() from exc

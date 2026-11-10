@@ -1,9 +1,10 @@
 """Authenticated application-preparation endpoints.
 
 Every route is scoped by the authenticated user inside ``ApplicationService``.
-Submission only happens after an explicit approval whose fingerprint still
-matches the reviewed application; unsupported platforms return a guided manual
-result rather than a fabricated success.
+ApplyPilot never performs the final submission: the user completes it on the
+employer's page and records it explicitly with ``/mark-submitted``. The
+``/submit`` route only hands off the manual steps after an approval whose
+fingerprint still matches the reviewed application.
 """
 
 from __future__ import annotations
@@ -33,9 +34,11 @@ from app.schemas.application import (
     UpdateQuestionRequest,
     UpdateStageRequest,
 )
+from app.schemas.application_workflow import ApplicationWorkflowResponse
 from app.schemas.common import ErrorResponse
 from app.services.application_adapters import adapter_catalog
 from app.services.application_service import ApplicationService
+from app.services.application_workflow_service import ApplicationWorkflowService
 
 router = APIRouter(prefix="/applications", tags=["Applications"])
 
@@ -275,14 +278,37 @@ async def approve_application(
     return _preview(service, application)
 
 
+@router.get(
+    "/{application_id}/workflow",
+    response_model=ApplicationWorkflowResponse,
+    summary="Get the end-to-end workflow snapshot",
+    description=(
+        "Derives one consistent workflow stage, submission phase and list of "
+        "next actions from the existing application, browser-session, form "
+        "analysis, execution and intervention records. It is read-only: it "
+        "never fills, submits or opens a browser, and it never marks a "
+        "submission without explicit user evidence."
+    ),
+    responses=ERROR_RESPONSES,
+)
+async def get_application_workflow(
+    application_id: ApplicationId, current_user: CurrentUser, db: Database
+) -> ApplicationWorkflowResponse:
+    return await ApplicationWorkflowService(db).snapshot(
+        current_user, application_id
+    )
+
+
 @router.post(
     "/{application_id}/submit",
     response_model=SubmissionResponse,
-    summary="Submit the approved application",
+    summary="Hand off an approved application for manual submission",
     description=(
-        "Requires a current explicit approval. Automated platforms are submitted "
-        "by the browser adapter; manual platforms return instructions and submit "
-        "nothing. Credentials, OTPs and CAPTCHA challenges are never handled."
+        "Requires a current explicit approval. ApplyPilot never clicks the "
+        "employer's Submit, Apply or Finish control: this returns the manual "
+        "handoff steps and records that you must finish on the employer's page. "
+        "Record the result with /mark-submitted and confirmed=true. Credentials, "
+        "OTPs and CAPTCHA challenges are never handled."
     ),
     responses=ERROR_RESPONSES,
 )
@@ -320,7 +346,12 @@ async def confirm_manual_submission(
 ) -> ApplicationPreviewResponse:
     service = ApplicationService(db)
     application = await service.confirm_manual_submission(
-        current_user, application_id, reference=payload.reference
+        current_user,
+        application_id,
+        reference=payload.reference,
+        confirmed=payload.confirmed,
+        confirmation_url=payload.confirmation_url,
+        confirmation_message=payload.confirmation_message,
     )
     return _preview(service, application)
 

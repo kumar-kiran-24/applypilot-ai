@@ -242,22 +242,6 @@ class PlaywrightSession:
         errors = await self._page.evaluate(_VALIDATION_JS, MAX_ERRORS)  # type: ignore[attr-defined]
         return [str(error)[:300] for error in errors]
 
-    async def submit(self, selectors: object) -> None:
-        page = self._page
-        button = page.locator(selectors.submit).last  # type: ignore[attr-defined]
-        if await button.count() == 0:
-            raise ManualInterventionRequired(
-                "No submit button was found on the inspected form.",
-                step="submit",
-            )
-        button_text = ((await button.inner_text()) or "").lower()
-        if button_text and any(word in button_text for word in ("login", "sign in", "verify")):
-            raise ManualInterventionRequired(
-                "The form needs the account owner to sign in or verify first.",
-                step="authentication",
-            )
-        await button.click()
-
     async def confirmation_reference(self, selector: str) -> str | None:
         page = self._page
         try:
