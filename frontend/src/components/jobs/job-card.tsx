@@ -12,7 +12,8 @@ import {
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
-import { JobMatchPanel } from "@/components/jobs/match-panel";
+import { JobIntelligencePanel } from "@/components/intelligence/job-intelligence-panel";
+import { ResumeComparisonPanel } from "@/components/intelligence/resume-comparison-panel";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { buttonClasses } from "@/components/ui/button";
@@ -192,8 +193,9 @@ export function JobCard({ job }: { job: Job }) {
       ) : null}
 
       {open ? (
-        <div className="mt-3">
-          <JobMatchPanel jobId={job.id} />
+        <div className="mt-3 space-y-3">
+          <JobIntelligencePanel jobId={job.id} />
+          <ResumeComparisonPanel jobId={job.id} />
         </div>
       ) : null}
     </article>

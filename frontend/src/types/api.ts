@@ -1180,6 +1180,232 @@ export interface FillExecutionResponse {
   final_submission_note: string;
 }
 
+/* ---------------------------------------------------------------------------
+ * Phase 2F structured intelligence (backend/app/schemas/*intelligence*.py)
+ * ------------------------------------------------------------------------- */
+
+/** One explainable fact behind a match score. Never a storage path or file text. */
+export interface MatchEvidence {
+  category: string;
+  description: string;
+  resume_reference: string | null;
+  confidence: string;
+  match_reason: string;
+}
+
+export type ExtractionConfidence = "high" | "medium" | "low";
+
+/** `ready` and `failed` are stored; `stale`/`missing` were computed on read. */
+export type ResumeAnalysisState = "ready" | "stale" | "missing" | "failed";
+
+export type ResumeProcessingState =
+  | "ready"
+  | "partial"
+  | "analysis_required"
+  | "extraction_failed"
+  | "invalid"
+  | "inaccessible";
+
+export interface JobIntelligenceFields {
+  job_title: string;
+  company: string | null;
+  description: string | null;
+  required_skills: string[];
+  preferred_skills: string[];
+  experience_years: number | null;
+  experience_years_max: number | null;
+  education_level: string | null;
+  education_field: string | null;
+  education_requirement: string | null;
+  required_qualifications: string[];
+  responsibilities: string[];
+  employment_type: string | null;
+  work_location: string | null;
+  work_mode: string | null;
+  salary_range: string | null;
+  experience_level: string;
+  required_certifications: string[];
+  application_url: string | null;
+  application_url_is_listing: boolean;
+}
+
+export interface JobIntelligenceExtraction {
+  confidence: ExtractionConfidence | string;
+  provenance: Record<string, string>;
+  field_confidence: Record<string, string>;
+  contradictions: string[];
+  warnings: string[];
+  llm_used: boolean;
+  llm_status: string;
+  llm_model: string | null;
+  extractor_version: string;
+  dropped_llm_claims: string[];
+  supplemented_fields: string[];
+  computed_at: string;
+  cached: boolean;
+}
+
+export interface JobIntelligenceResponse {
+  job_id: string;
+  fields: JobIntelligenceFields;
+  extraction: JobIntelligenceExtraction;
+  disclaimer: string;
+  message: string | null;
+}
+
+export interface ResumeFact {
+  source: string;
+  confidence: ExtractionConfidence | string;
+  evidence: string | null;
+  method: string;
+}
+
+export interface ResumeSkillFact extends ResumeFact {
+  name: string;
+  category: string;
+  explicit: boolean;
+  category_inferred: boolean;
+}
+
+export interface ResumeExperienceFact extends ResumeFact {
+  company: string | null;
+  role: string | null;
+  location: string | null;
+  start_date: string | null;
+  end_date: string | null;
+  is_current: boolean;
+  duration_months: number | null;
+  responsibilities: string[];
+  achievements: string[];
+  technologies: string[];
+}
+
+export interface ResumeProjectFact extends ResumeFact {
+  title: string;
+  description: string | null;
+  technologies: string[];
+  contribution: string | null;
+  demonstrated_skills: string[];
+  measurable_outcomes: string[];
+  url: string | null;
+}
+
+export interface ResumeEducationFact extends ResumeFact {
+  institution: string | null;
+  degree: string | null;
+  specialization: string | null;
+  start_date: string | null;
+  end_date: string | null;
+  graduation_year: number | null;
+  achievements: string[];
+}
+
+export interface ResumeCertificationFact extends ResumeFact {
+  name: string;
+  issuing_organization: string | null;
+  issued_on: string | null;
+}
+
+export interface ResumeIntelligenceFields {
+  summary: string | null;
+  total_experience_months: number | null;
+  has_dated_experience: boolean;
+  skills: ResumeSkillFact[];
+  experience: ResumeExperienceFact[];
+  projects: ResumeProjectFact[];
+  education: ResumeEducationFact[];
+  certifications: ResumeCertificationFact[];
+  sections_found: string[];
+}
+
+export interface ResumeIntelligenceExtraction {
+  status: string;
+  analysis_state: ResumeAnalysisState;
+  confidence: ExtractionConfidence | string;
+  provenance: Record<string, string>;
+  field_confidence: Record<string, string>;
+  warnings: string[];
+  error_code: string | null;
+  extractor_version: string;
+  computed_at: string;
+  cached: boolean;
+}
+
+export interface ResumeIntelligenceResponse {
+  resume_id: string;
+  fields: ResumeIntelligenceFields;
+  extraction: ResumeIntelligenceExtraction;
+  disclaimer: string;
+  message: string | null;
+}
+
+export interface ResumeComparisonEntry {
+  resume_id: string;
+  resume_title: string;
+  rank: number | null;
+  processing_state: ResumeProcessingState | string;
+  state_reason: string;
+  comparable: boolean;
+  is_recommended: boolean;
+  overall_score: number | null;
+  scores: MatchScoreBreakdown;
+  required_skill_coverage: number | null;
+  required_skills_matched: number | null;
+  required_skills_total: number | null;
+  evidence_confidence: ExtractionConfidence | string | null;
+  match_processing_state: string | null;
+  matched_required_skills: string[];
+  missing_required_skills: string[];
+  evidence: MatchEvidence[];
+  gaps: string[];
+  explanation: string;
+}
+
+export interface ResumeProcessingFailure {
+  resume_id: string;
+  resume_title: string;
+  processing_state: string;
+  reason: string;
+}
+
+export interface ResumeAlternative {
+  resume_id: string;
+  resume_title: string;
+  overall_score: number;
+  score_difference: number;
+  distinguishing_factors: string[];
+}
+
+export interface ResumeRecommendation {
+  resume_id: string;
+  resume_title: string;
+  overall_score: number;
+  confidence: ExtractionConfidence | string;
+  reasons: string[];
+  supporting_evidence: MatchEvidence[];
+  important_gaps: string[];
+  close_call: boolean;
+  close_call_threshold: number;
+  close_call_explanation: string | null;
+  alternatives: ResumeAlternative[];
+}
+
+export interface ResumeComparisonResponse {
+  job_id: string;
+  status: string;
+  total_resumes: number;
+  compared_resumes: number;
+  resumes: ResumeComparisonEntry[];
+  recommendation: ResumeRecommendation | null;
+  close_score: boolean;
+  close_score_threshold: number;
+  processing_failures: ResumeProcessingFailure[];
+  algorithm_version: string;
+  generated_at: string;
+  disclaimer: string;
+  message: string | null;
+}
+
 /** Body of `GET /api/auth/session` (frontend BFF, not a backend route). */
 export interface SessionResponse {
   authenticated: boolean;

@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 
+import { ResumeIntelligencePanel } from "@/components/intelligence/resume-intelligence-panel";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -180,6 +181,11 @@ export function ResumeCard({
             extracted details.
           </Alert>
         ) : null}
+
+        <ResumeIntelligencePanel
+          resumeId={resume.id}
+          parsingStatus={resume.parsing_status}
+        />
 
         {hasDetails || resume.parsing_status === "completed" ? (
           <div>

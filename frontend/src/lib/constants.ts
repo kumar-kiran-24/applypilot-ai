@@ -65,6 +65,16 @@ const PROXY_ROUTES: ReadonlyArray<{
     pattern: new RegExp(`^jobs/${UUID_PATTERN}/matches$`),
     route: JSON_ROUTE,
   },
+  {
+    method: "POST",
+    pattern: new RegExp(`^jobs/${UUID_PATTERN}/compare-resumes$`),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "GET",
+    pattern: new RegExp(`^jobs/${UUID_PATTERN}/recommendation$`),
+    route: JSON_ROUTE,
+  },
   { method: "GET", pattern: /^profile$/, route: JSON_ROUTE },
   { method: "PUT", pattern: /^profile$/, route: JSON_ROUTE },
   { method: "GET", pattern: /^profile\/completeness$/, route: JSON_ROUTE },
@@ -327,6 +337,16 @@ const PROXY_ROUTES: ReadonlyArray<{
   {
     method: "GET",
     pattern: new RegExp(`^resumes/${UUID_PATTERN}$`),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "POST",
+    pattern: new RegExp(`^resumes/${UUID_PATTERN}/analyze$`),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "GET",
+    pattern: new RegExp(`^resumes/${UUID_PATTERN}/intelligence$`),
     route: JSON_ROUTE,
   },
   {

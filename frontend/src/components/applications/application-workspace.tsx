@@ -20,6 +20,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { ApplicationEligibilityPanel } from "@/components/auto-apply/eligibility-panel";
 import { ApplicationBrowserWorkspace } from "@/components/applications/application-browser-workspace";
+import { ApplicationResumePanel } from "@/components/applications/application-resume-panel";
 import { ApplicationFillPanel } from "@/components/applications/application-fill-panel";
 import { ApplicationHumanLoopPanel } from "@/components/applications/application-human-loop-panel";
 import { EmployerApplicationUrlForm } from "@/components/applications/employer-application-url-form";
@@ -41,12 +42,10 @@ import {
   useApplicationWorkflow,
   useApproveApplication,
   useConfirmManualSubmission,
-  useSelectApplicationResume,
   useSubmitApplication,
   useUpdateApplicationQuestion,
   useUpdateApplicationStage,
 } from "@/features/applications/hooks";
-import { useResumes } from "@/features/resumes/hooks";
 import { describeError } from "@/lib/api/errors";
 import { cn } from "@/lib/utils/cn";
 import { formatDate, formatDateTime } from "@/lib/utils/format";
@@ -591,105 +590,6 @@ function QuestionField({
   );
 }
 
-function ResumePanel({
-  applicationId,
-  preview,
-  editable,
-}: {
-  applicationId: string;
-  preview: ApplicationPreview;
-  editable: boolean;
-}) {
-  const resumes = useResumes();
-  const selectResume = useSelectApplicationResume(applicationId);
-  const current = preview.resume;
-  const [selected, setSelected] = useState(current.id ?? "");
-  const items = resumes.data ?? [];
-  const chosen = selected || current.id || "";
-
-  return (
-    <Card>
-      <CardHeader>
-        <div>
-          <CardTitle>Resume for this application</CardTitle>
-          <CardDescription>
-            Chosen by the matching engine. You can override it here without
-            changing the original PDF.
-          </CardDescription>
-        </div>
-        {current.score !== null ? (
-          <Badge variant={current.score >= 75 ? "success" : "warning"}>
-            {current.score}% match
-          </Badge>
-        ) : null}
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="flex items-start gap-3 rounded-xl border border-white/[0.07] bg-white/[0.02] p-3">
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] text-sky-300">
-            <FileText aria-hidden="true" className="h-4 w-4" />
-          </span>
-          <div className="min-w-0">
-            <p className="truncate text-[13px] font-medium text-ink">
-              {current.filename ?? "No resume selected"}
-            </p>
-            <p className="mt-1 text-[12px] leading-relaxed text-ink-muted">
-              {current.reason || "Select a resume before approving the application."}
-            </p>
-          </div>
-        </div>
-
-        {items.length === 0 ? (
-          <p className="text-[12px] text-ink-muted">
-            Upload a PDF resume in the{" "}
-            <Link href="/resumes" className="text-sky-300 hover:underline">
-              resume manager
-            </Link>{" "}
-            to include it here.
-          </p>
-        ) : editable ? (
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <select
-              value={chosen}
-              onChange={(event) => setSelected(event.target.value)}
-              className={inputClass}
-              aria-label="Choose a resume"
-            >
-              <option value="">Select a resume…</option>
-              {items.map((resume) => (
-                <option key={resume.id} value={resume.id}>
-                  {resume.original_filename}
-                  {resume.is_default ? " (default)" : ""}
-                </option>
-              ))}
-            </select>
-            <Button
-              variant="secondary"
-              disabled={!chosen || chosen === current.id || selectResume.isPending}
-              onClick={() => selectResume.mutate(chosen)}
-              className="shrink-0"
-            >
-              {selectResume.isPending ? (
-                <>
-                  <Spinner className="h-4 w-4" />
-                  Selecting…
-                </>
-              ) : (
-                "Use this resume"
-              )}
-            </Button>
-          </div>
-        ) : null}
-
-        {selectResume.error ? (
-          <Alert variant="danger" title="Could not change the resume">
-            {describeError(selectResume.error)}
-          </Alert>
-        ) : null}
-      </CardContent>
-    </Card>
-  );
-}
-
 function ApplicationUrlPanel({
   applicationId,
   preview,
@@ -1073,7 +973,7 @@ export function ApplicationWorkspace({ applicationId }: { applicationId: string 
               <CardContent className="space-y-4">
                 {currentSection.section === "documents" ? (
                   <div className="space-y-4">
-                    <ResumePanel
+                    <ApplicationResumePanel
                       applicationId={applicationId}
                       preview={preview}
                       editable={editable}
