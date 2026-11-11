@@ -183,7 +183,10 @@ async def inspect_application(
 ) -> ApplicationPreviewResponse:
     service = ApplicationService(db)
     application = await service.set_application_url(
-        current_user, application_id, payload.application_url
+        current_user,
+        application_id,
+        payload.application_url,
+        employer_careers_url=payload.employer_careers_url,
     )
     return _preview(service, application)
 

@@ -45,7 +45,9 @@ _RESPONSIBILITY_HEADING_RE = re.compile(
 )
 _OTHER_HEADING_RE = re.compile(
     r"^(?:benefits|perks|about\s+(?:us|the\s+company)|compensation|salary|"
-    r"equal\s+opportunity|how\s+to\s+apply|why\s+(?:join|work))\b",
+    r"certifications?|certificates?|licenses?|credentials?|education|"
+    r"skills|technologies|equal\s+opportunity|how\s+to\s+apply|"
+    r"why\s+(?:join|work))\b",
     re.IGNORECASE,
 )
 _BULLET_RE = re.compile(
@@ -278,6 +280,25 @@ def _responsibilities(lines: list[str]) -> tuple[str, ...]:
     return tuple(cleaned)
 
 
+def normalized_description(description: str | None) -> str:
+    """Normalised posting text, shared with the Phase 2F job understanding."""
+    return _normalize_text(description)
+
+
+def description_sections(description: str | None) -> dict[str, list[str]]:
+    """Return the classified posting sections (required/preferred/etc.).
+
+    The values are the raw (normalised) lines of each section, so callers can
+    extract qualification or certification lines without duplicating the
+    heading rules used for matching.
+    """
+    text = _normalize_text(description)
+    if not text:
+        return {}
+    _header, sections = _section_lines(text)
+    return sections
+
+
 def build_job_requirements(
     *,
     job_title: str,
@@ -349,4 +370,6 @@ __all__ = [
     "REQUIREMENTS_VERSION",
     "JobRequirements",
     "build_job_requirements",
+    "description_sections",
+    "normalized_description",
 ]

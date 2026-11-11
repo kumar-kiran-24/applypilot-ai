@@ -14,12 +14,25 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, Path, Query, Response, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.serializers import as_utc
 from app.core.dependencies import get_authenticated_user
 from app.db.session import get_db
 from app.models.resume import Resume
 from app.models.user import User
 from app.schemas.common import DeleteResponse, ErrorResponse
 from app.schemas.resume import ParsedResumeData, ResumeResponse
+from app.schemas.resume_intelligence import (
+    AnalyzeResumeRequest,
+    ResumeIntelligenceExtraction,
+    ResumeIntelligenceResponse,
+)
+from app.services.resume_intelligence_service import (
+    STATE_FAILED,
+    STATE_MISSING,
+    STATE_STALE,
+    ResumeIntelligenceResult,
+    ResumeIntelligenceService,
+)
 from app.services.resume_service import ResumeService, pdf_filename_for_header
 from app.services.resume_storage import get_resume_storage
 
@@ -42,8 +55,58 @@ async def get_resume_service(
 
 
 ServiceDep = Annotated[ResumeService, Depends(get_resume_service)]
+Database = Annotated[AsyncSession, Depends(get_db)]
 CurrentUser = Annotated[User, Depends(get_authenticated_user)]
 ResumeId = Annotated[UUID, Path(description="Resume UUID")]
+
+
+def _intelligence_response(
+    resume: Resume,
+    result: ResumeIntelligenceResult,
+    *,
+    message: str | None = None,
+) -> ResumeIntelligenceResponse:
+    return ResumeIntelligenceResponse(
+        resume_id=resume.id,
+        fields=result.fields,
+        extraction=ResumeIntelligenceExtraction(
+            status=result.status,
+            analysis_state=result.analysis_state,
+            confidence=result.confidence,
+            provenance=result.provenance,
+            field_confidence=result.field_confidence,
+            warnings=result.warnings,
+            error_code=result.error_code,
+            extractor_version=result.extractor_version,
+            computed_at=as_utc(result.computed_at) or result.computed_at,
+            cached=result.cached,
+        ),
+        message=message,
+    )
+
+
+def _intelligence_message(result: ResumeIntelligenceResult) -> str | None:
+    """Explain the cache/analysis state without leaking internals."""
+    if result.analysis_state == STATE_FAILED:
+        suffix = f" ({result.error_code})" if result.error_code else ""
+        return (
+            "Resume analysis failed"
+            + suffix
+            + ". Nothing was inferred from the missing content."
+        )
+    if result.analysis_state == STATE_STALE:
+        return (
+            "The stored resume analysis is out of date. This reading was computed "
+            "for this response only; send an analyze request to save it."
+        )
+    if result.analysis_state == STATE_MISSING:
+        return (
+            "No resume analysis has been stored yet. This reading was computed for "
+            "this response only; send an analyze request to save it."
+        )
+    if result.cached:
+        return "Cached analysis reused. Send force=true to re-run it."
+    return None
 
 
 def _to_response(resume: Resume) -> ResumeResponse:
@@ -106,6 +169,59 @@ async def get_resume(
 ) -> ResumeResponse:
     resume = await service.get_resume(current_user, resume_id)
     return _to_response(resume)
+
+
+@router.post(
+    "/{resume_id}/analyze",
+    response_model=ResumeIntelligenceResponse,
+    summary="Analyze a resume",
+    description=(
+        "Extracts structured evidence from one owned resume using deterministic "
+        "rules. Every fact records its provenance and confidence, nothing is "
+        "inferred from missing content, and the uploaded file is never modified. "
+        "Results are cached per resume content until it changes or `force` is "
+        "requested."
+    ),
+    responses=ERROR_RESPONSES,
+)
+async def analyze_resume(
+    resume_id: ResumeId,
+    current_user: CurrentUser,
+    db: Database,
+    body: AnalyzeResumeRequest | None = None,
+) -> ResumeIntelligenceResponse:
+    request = body or AnalyzeResumeRequest()
+    resume, result = await ResumeIntelligenceService(db).analyze_resume(
+        current_user, resume_id, force=request.force
+    )
+    return _intelligence_response(
+        resume, result, message=_intelligence_message(result)
+    )
+
+
+@router.get(
+    "/{resume_id}/intelligence",
+    response_model=ResumeIntelligenceResponse,
+    summary="Get structured resume intelligence",
+    description=(
+        "Returns the stored analysis for one owned resume, explicitly labelled as "
+        "`ready`, `failed`, `stale` or `missing`. When no current stored reading "
+        "exists, a deterministic reading is computed for this response only and "
+        "is not saved; use the analyze endpoint to persist it."
+    ),
+    responses=ERROR_RESPONSES,
+)
+async def get_resume_intelligence(
+    resume_id: ResumeId,
+    current_user: CurrentUser,
+    db: Database,
+) -> ResumeIntelligenceResponse:
+    resume, result = await ResumeIntelligenceService(
+        db
+    ).get_resume_intelligence(current_user, resume_id)
+    return _intelligence_response(
+        resume, result, message=_intelligence_message(result)
+    )
 
 
 @router.get(

@@ -76,6 +76,21 @@ class MatchScoreBreakdown(BaseModel):
     projects: float | None = None
 
 
+class MatchEvidenceResponse(BaseModel):
+    """One explainable fact behind a match score.
+
+    ``resume_reference`` points at the resume section the fact was read from
+    (for example ``skills section`` or ``experience: Backend Engineer``); it is
+    never a file path, storage key or raw document text.
+    """
+
+    category: str
+    description: str
+    resume_reference: str | None = None
+    confidence: str = "low"
+    match_reason: str = ""
+
+
 class ResumeMatchResponse(BaseModel):
     """One ranked resume evaluation for a job."""
 
@@ -94,6 +109,12 @@ class ResumeMatchResponse(BaseModel):
     explanation: str
     confidence: str
     computed_at: datetime
+    # Phase 2F.2.3 additions. Defaults keep older cached rows serializable.
+    evidence: list[MatchEvidenceResponse] = Field(default_factory=list)
+    missing_evidence: list[str] = Field(default_factory=list)
+    gaps: list[str] = Field(default_factory=list)
+    processing_state: str = "ready"
+    algorithm_version: str = ""
 
 
 class JobMatchesResponse(BaseModel):
@@ -204,6 +225,7 @@ __all__ = [
     "JobMatchesResponse",
     "JobRequirementsResponse",
     "JobResponse",
+    "MatchEvidenceResponse",
     "MatchJobRequest",
     "MatchScoreBreakdown",
     "MatchingSummaryResponse",

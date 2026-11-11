@@ -540,11 +540,24 @@ def _parse_projects(lines: list[str]) -> list[dict[str, Any]]:
     return entries
 
 
+def resume_sections(text: str) -> tuple[list[str], dict[str, list[str]]]:
+    """Return ``(header_lines, sections)`` using the parser's heading rules.
+
+    Shared with resume intelligence so section detection and parsing can never
+    disagree about where a section starts.
+    """
+    raw_lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    return _split_sections([_clean_line(line) for line in raw_lines])
+
+
+def split_skill_tokens(lines: list[str]) -> list[str]:
+    """Split skill-section lines into individual tokens (same rules as parsing)."""
+    return _split_skill_tokens(lines)
+
+
 def parse_resume_text(text: str) -> ParsedResume:
     """Extract structured information from resume text using explicit rules."""
-    raw_lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    lines = [_clean_line(line) for line in raw_lines]
-    header, sections = _split_sections(lines)
+    header, sections = resume_sections(text)
 
     email_match = EMAIL_RE.search(text)
     links = _dedupe(
@@ -593,4 +606,6 @@ __all__ = [
     "extract_text_from_pdf",
     "parse_resume",
     "parse_resume_text",
+    "resume_sections",
+    "split_skill_tokens",
 ]

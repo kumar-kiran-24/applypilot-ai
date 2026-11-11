@@ -564,8 +564,14 @@ async def test_persisted_session_contains_no_credentials(
 
 
 async def test_capabilities_report_the_missing_streaming_component(
-    client: AsyncClient, session_factory: SessionFactory
+    client: AsyncClient,
+    session_factory: SessionFactory,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Pin the deployment state under test instead of depending on the ambient
+    # .env, which enables streaming for local end-to-end runs.
+    monkeypatch.setattr(settings, "APPLICATION_AUTOMATION_ENABLED", True)
+    monkeypatch.setattr(settings, "APPLICATION_BROWSER_STREAMING_ENABLED", False)
     user = await create_user(
         session_factory, email="caps@example.com", google_sub="google-caps"
     )

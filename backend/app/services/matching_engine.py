@@ -192,6 +192,16 @@ def normalize_skill_key(value: str) -> str:
     return _skill_key(value)
 
 
+def skill_display_name(value: str) -> str:
+    """Canonical spelling of a skill, or ``value`` when it is not in the vocabulary."""
+    return _CANONICAL_SKILLS.get(_skill_key(value), value)
+
+
+def title_tokens(value: str | None) -> tuple[str, ...]:
+    """Public role-language tokens, so advanced matching reuses the same rules."""
+    return _title_tokens(value)
+
+
 def education_level_rank(text: str | None) -> int:
     """Return the highest degree rank mentioned in resume text (0 if none)."""
     for rank, pattern in _DEGREE_PATTERNS:
@@ -888,4 +898,6 @@ __all__ = [
     "match_resume",
     "normalize_skill_key",
     "rank_results",
+    "skill_display_name",
+    "title_tokens",
 ]

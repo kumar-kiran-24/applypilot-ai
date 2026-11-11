@@ -115,8 +115,9 @@ _PROTECTED_TYPES = frozenset(
 
 _MANUAL_HANDOFF_NOTE = (
     "Live browser streaming is disabled on this deployment, so the Playwright "
-    "page cannot be shown in this interface. Enable it on the backend to view "
-    "and complete the page here; no submission is automated."
+    "page cannot be shown in this interface and external changes cannot be "
+    "observed. Enable it on the backend to view and complete the page here; no "
+    "submission is automated."
 )
 
 _STREAM_HANDOFF_NOTE = (

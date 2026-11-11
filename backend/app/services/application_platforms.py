@@ -235,6 +235,84 @@ def _matches_any(patterns: tuple[str, ...], value: str) -> bool:
     return any(re.search(pattern, value, re.IGNORECASE) for pattern in patterns)
 
 
+def is_job_board_url(raw_url: str) -> bool:
+    """Return True when ``raw_url`` points at a supported job board.
+
+    The check is static and offline. An invalid or unsafe URL is not a job
+    board; its own validation reports the precise problem.
+    """
+    try:
+        host = (urlsplit(normalize_application_url(raw_url)).hostname or "").lower()
+    except ApplicationUrlError:
+        return False
+    return bool(host) and _matches_any(_JOB_BOARD_HOSTS, host)
+
+
+_URL_IN_TEXT = re.compile(r"https?://[^\s<>\"')\]]+", re.IGNORECASE)
+_APPLY_HINTS = re.compile(
+    r"(apply|application|careers?|jobs?|positions?|openings?)", re.IGNORECASE
+)
+_SKIPPED_PATH_SUFFIXES = (
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".webp",
+    ".css",
+    ".js",
+    ".pdf",
+    ".ico",
+)
+
+
+def suggest_employer_application_url(
+    text: str | None, *, listing_url: str | None = None
+) -> str | None:
+    """Suggest a plausible employer application URL from trusted listing text.
+
+    This is deliberately conservative: it only extracts absolute public http(s)
+    URLs from the stored job description, ignores job-board links and obvious
+    assets, and prefers links whose path looks like an application or careers
+    page. The suggestion is advisory - the update endpoint validates it again
+    before it is stored or visited.
+    """
+    if not text:
+        return None
+    normalized_listing = ""
+    if listing_url:
+        try:
+            normalized_listing = normalize_application_url(listing_url)
+        except ApplicationUrlError:
+            normalized_listing = ""
+
+    scored: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for match in _URL_IN_TEXT.findall(text):
+        candidate = match.rstrip(".,;:!?")
+        try:
+            normalized = normalize_application_url(candidate)
+        except ApplicationUrlError:
+            continue
+        if normalized in seen or normalized == normalized_listing:
+            continue
+        seen.add(normalized)
+        parts = urlsplit(normalized)
+        if parts.path.lower().endswith(_SKIPPED_PATH_SUFFIXES):
+            continue
+        if is_job_board_url(normalized):
+            continue
+        score = 1
+        if _APPLY_HINTS.search(f"{parts.path} {parts.query}"):
+            score += 2
+        scored.append((score, normalized))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: (-item[0], len(item[1])))
+    return scored[0][1]
+
+
+
 def detect_platform(raw_url: str) -> PlatformDetection:
     """Classify an application URL into a supported platform.
 
@@ -342,6 +420,8 @@ __all__ = [
     "PlatformDetection",
     "PlatformSpec",
     "detect_platform",
+    "is_job_board_url",
     "normalize_application_url",
     "platform_catalog",
+    "suggest_employer_application_url",
 ]

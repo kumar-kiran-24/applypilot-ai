@@ -14,12 +14,26 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.serializers import job_matches_response, job_response
+from app.api.v1.serializers import (
+    job_intelligence_response,
+    job_matches_response,
+    job_response,
+    resume_comparison_response,
+)
 from app.core.dependencies import get_authenticated_user
 from app.core.logging import get_logger
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.common import ErrorResponse
+from app.schemas.job_intelligence import (
+    LLM_STATUS_DISABLED,
+    LLM_STATUS_FAILED,
+    LLM_STATUS_NO_DESCRIPTION,
+    LLM_STATUS_NOT_ANALYZED,
+    LLM_STATUS_NOT_CONFIGURED,
+    AnalyzeJobRequest,
+    JobIntelligenceResponse,
+)
 from app.schemas.matching import (
     DiscoverJobsResponse,
     JobListResponse,
@@ -27,9 +41,18 @@ from app.schemas.matching import (
     JobResponse,
     MatchJobRequest,
 )
+from app.schemas.resume_comparison import (
+    CompareResumesRequest,
+    ResumeComparisonResponse,
+)
 from app.services.job_discovery import fetch_glassdoor_jobs, store_glassdoor_jobs
 from app.services.job_service import JobService
+from app.services.job_understanding_service import (
+    JobIntelligenceResult,
+    JobUnderstandingService,
+)
 from app.services.matching_service import MatchingService
+from app.services.resume_comparison_service import ResumeComparisonService
 
 logger = get_logger(__name__)
 
@@ -46,6 +69,37 @@ ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
     422: {"model": ErrorResponse},
 }
 
+
+def _intelligence_message(result: JobIntelligenceResult) -> str | None:
+    """Explain how the returned analysis was produced, without leaking config."""
+    if result.cached:
+        return "Cached analysis reused. Send force=true to re-run it."
+    if result.llm_status == LLM_STATUS_DISABLED:
+        return (
+            "Deterministic analysis only; LLM enrichment was disabled for this "
+            "request."
+        )
+    if result.llm_status == LLM_STATUS_NOT_CONFIGURED:
+        return (
+            "Deterministic analysis only; LLM enrichment is not configured on "
+            "this server."
+        )
+    if result.llm_status == LLM_STATUS_NO_DESCRIPTION:
+        return (
+            "The posting has no usable description; only the stored title, "
+            "company and location were analysed."
+        )
+    if result.llm_status == LLM_STATUS_FAILED:
+        return (
+            "Deterministic analysis returned because LLM enrichment failed; "
+            "send another analyze request to retry."
+        )
+    if result.llm_status == LLM_STATUS_NOT_ANALYZED:
+        return (
+            "Deterministic analysis computed on request and not saved. Send an "
+            "analyze request to persist it."
+        )
+    return None
 
 @router.post(
     "/discover",
@@ -140,6 +194,57 @@ async def get_job(job_id: JobId, current_user: CurrentUser, db: Database) -> Job
 
 
 @router.post(
+    "/{job_id}/analyze",
+    response_model=JobIntelligenceResponse,
+    summary="Analyze a job posting",
+    description=(
+        "Extracts structured requirements from an owned posting using "
+        "deterministic rules first, then optional validated LLM assistance. "
+        "Every field records its provenance and confidence, and model claims "
+        "that the posting does not support are dropped. Results are cached per "
+        "posting until its text changes or `force` is requested."
+    ),
+    responses=ERROR_RESPONSES,
+)
+async def analyze_job(
+    job_id: JobId,
+    current_user: CurrentUser,
+    db: Database,
+    body: AnalyzeJobRequest | None = None,
+) -> JobIntelligenceResponse:
+    request = body or AnalyzeJobRequest()
+    job, result = await JobUnderstandingService(db).analyze(
+        current_user,
+        job_id,
+        force=request.force,
+        use_llm=request.use_llm,
+    )
+    return job_intelligence_response(
+        job, result, message=_intelligence_message(result)
+    )
+
+
+@router.get(
+    "/{job_id}/intelligence",
+    response_model=JobIntelligenceResponse,
+    summary="Get structured job intelligence",
+    description=(
+        "Returns the cached analysis for a stored posting. When none has been "
+        "computed, a deterministic analysis is returned without being saved and "
+        "without calling an LLM; use the analyze endpoint to persist it."
+    ),
+    responses=ERROR_RESPONSES,
+)
+async def get_job_intelligence(
+    job_id: JobId, current_user: CurrentUser, db: Database
+) -> JobIntelligenceResponse:
+    job, result = await JobUnderstandingService(db).get(current_user, job_id)
+    return job_intelligence_response(
+        job, result, message=_intelligence_message(result)
+    )
+
+
+@router.post(
     "/{job_id}/match",
     response_model=JobMatchesResponse,
     summary="Match every resume against a job",
@@ -184,6 +289,49 @@ async def get_job_matches(
     rows = await MatchingService(db).get_job_matches(current_user, job)
     message = None if rows else "No matches have been computed for this job yet."
     return job_matches_response(job, rows, message=message)
+
+
+@router.post(
+    "/{job_id}/compare-resumes",
+    response_model=ResumeComparisonResponse,
+    summary="Compare every resume against a job",
+    description=(
+        "Compares all of the user's resumes against an owned posting using the "
+        "existing evidence-based matcher, ranks them deterministically and "
+        "recommends the best one. Persisted matches are reused unless `force` is "
+        "true. Resumes that cannot be compared are reported with a reason and do "
+        "not fail the comparison."
+    ),
+    responses=ERROR_RESPONSES,
+)
+async def compare_resumes(
+    job_id: JobId,
+    current_user: CurrentUser,
+    db: Database,
+    body: CompareResumesRequest | None = None,
+) -> ResumeComparisonResponse:
+    outcome = await ResumeComparisonService(db).compare(
+        current_user, job_id, force=bool(body and body.force)
+    )
+    return resume_comparison_response(outcome)
+
+
+@router.get(
+    "/{job_id}/recommendation",
+    response_model=ResumeComparisonResponse,
+    summary="Get the stored resume recommendation for a job",
+    description=(
+        "Returns the recommendation built from previously computed matches "
+        "without recomputing. When no comparison has been stored it returns a "
+        "`not_computed` status and asks for the compare request."
+    ),
+    responses=ERROR_RESPONSES,
+)
+async def get_resume_recommendation(
+    job_id: JobId, current_user: CurrentUser, db: Database
+) -> ResumeComparisonResponse:
+    outcome = await ResumeComparisonService(db).read(current_user, job_id)
+    return resume_comparison_response(outcome)
 
 
 __all__ = ["router"]

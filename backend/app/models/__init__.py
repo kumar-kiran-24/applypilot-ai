@@ -43,6 +43,7 @@ from app.models.education import Education
 from app.models.experience import EmploymentType, Experience
 from app.models.gmail_connection import GmailConnection
 from app.models.job import Job
+from app.models.job_intelligence import JobIntelligence
 from app.models.job_match import JobResumeMatch
 from app.models.missing_information import (
     MissingInformationItemStatus,
@@ -52,6 +53,7 @@ from app.models.missing_information import (
 from app.models.preference import JobPreference, RelocationPreference, WorkMode
 from app.models.project import Project
 from app.models.resume import Resume, ResumeParsingStatus
+from app.models.resume_intelligence import ResumeIntelligence
 from app.models.revoked_token import RevokedToken
 from app.models.user import User
 
@@ -83,6 +85,7 @@ __all__ = [
     "InterventionStatus",
     "InterventionType",
     "Job",
+    "JobIntelligence",
     "JobPreference",
     "JobResumeMatch",
     "MissingInformationItemStatus",
@@ -93,6 +96,7 @@ __all__ = [
     "QuestionType",
     "RelocationPreference",
     "Resume",
+    "ResumeIntelligence",
     "ResumeParsingStatus",
     "RevokedToken",
     "User",

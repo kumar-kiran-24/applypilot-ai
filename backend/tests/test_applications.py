@@ -41,6 +41,22 @@ def automation_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "APPLICATION_AUTOMATION_ENABLED", False)
 
 
+@pytest.fixture(autouse=True)
+def public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """URL updates resolve through the real policy, not the network in tests."""
+
+    async def fake_validate(
+        url: str, *, resolver: Any = None
+    ) -> tuple[str, tuple[str, ...]]:
+        del resolver
+        return normalize_application_url(url), ("93.184.216.34",)
+
+    monkeypatch.setattr(
+        "app.services.application_service.validate_application_destination",
+        fake_validate,
+    )
+
+
 async def create_user(
     session_factory: SessionFactory,
     *,

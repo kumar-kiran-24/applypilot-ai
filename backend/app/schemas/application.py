@@ -107,7 +107,17 @@ class ApplicationPreviewResponse(BaseModel):
     company: str | None = None
     platform: str
     platform_name: str
+    # The employer's actual application form URL (or the listing until updated).
     application_url: str
+    # The original discovered posting, preserved for reference.
+    job_listing_url: str | None = None
+    # An optional employer careers page; never opened automatically.
+    employer_careers_url: str | None = None
+    # True when application_url still points at a job board instead of a form.
+    application_url_is_job_board: bool = False
+    # A conservative suggestion from trusted listing text. It is advisory and
+    # must be validated through /inspect before use.
+    suggested_application_url: str | None = None
     automation_mode: AutomationMode
     inspection_mode: InspectionMode
     status: str
@@ -176,9 +186,14 @@ class AnalyzeApplicationRequest(BaseModel):
 
 
 class InspectApplicationRequest(BaseModel):
-    """Supply or replace the employer's application URL."""
+    """Supply or replace the employer's application URL.
+
+    ``application_url`` must be the official application form, not a job board.
+    ``employer_careers_url`` is optional reference data and is never opened.
+    """
 
     application_url: str = Field(min_length=1, max_length=1000)
+    employer_careers_url: str | None = Field(default=None, max_length=1000)
 
 
 class UpdateQuestionRequest(BaseModel):

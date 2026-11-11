@@ -33,6 +33,8 @@ from app.models.job_match import JobResumeMatch
 from app.models.resume import Resume
 from app.models.user import User
 from app.schemas.resume import ParsedResumeData
+from app.services.advanced_matching_engine import MATCHING_ALGORITHM_VERSION
+from app.services.advanced_matching_service import AdvancedMatchingService
 from app.services.job_requirements import (
     REQUIREMENTS_VERSION,
     JobRequirements,
@@ -46,7 +48,6 @@ from app.services.matching_engine import (
     ProjectEntry,
     ResumeProfile,
     education_level_rank,
-    match_resume,
     normalize_skill_key,
     rank_results,
 )
@@ -55,32 +56,55 @@ from app.services.resume_parser import detect_known_skills
 logger = get_logger(__name__)
 
 
-def job_fingerprint(job: Job) -> str:
-    """Identity of the inputs that affect a job's score."""
+def job_fingerprint(
+    job: Job,
+    *,
+    intelligence_extractor_version: str = "",
+    intelligence_fingerprint: str = "",
+) -> str:
+    """Identity of the inputs that affect a job's score.
+
+    Includes the matching algorithm version and, when job intelligence is used,
+    that extraction's version and posting fingerprint. A change to any of them
+    invalidates cached matches without a schema migration.
+    """
     payload = "\x1f".join(
         (
+            MATCHING_ALGORITHM_VERSION,
             REQUIREMENTS_VERSION,
             job.job_title or "",
             job.company or "",
             job.location or "",
             job.job_description or "",
+            intelligence_extractor_version,
+            intelligence_fingerprint,
         )
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def resume_fingerprint(resume: Resume) -> str:
+def resume_fingerprint(
+    resume: Resume,
+    *,
+    intelligence_extractor_version: str = "",
+    intelligence_fingerprint: str = "",
+) -> str:
     """Identity of the parsed resume used for matching.
 
     ``is_default`` is deliberately excluded: toggling the default resume must
-    not invalidate cached scores.
+    not invalidate cached scores. The resume-intelligence version and content
+    fingerprint are included so new or re-extracted evidence invalidates the
+    cached score.
     """
     parsed_at = resume.parsed_at.isoformat() if resume.parsed_at else ""
     payload = "\x1f".join(
         (
+            MATCHING_ALGORITHM_VERSION,
             resume.checksum or "",
             parsed_at,
             resume.parsing_status.value,
+            intelligence_extractor_version,
+            intelligence_fingerprint,
         )
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -238,6 +262,7 @@ class MatchingService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.jobs = JobService(session)
+        self.advanced = AdvancedMatchingService(session)
 
     # --- Reads --------------------------------------------------------------
     async def get_job_matches(self, user: User, job: Job) -> list[JobResumeMatch]:
@@ -325,13 +350,22 @@ class MatchingService:
             await self.session.commit()
             return []
 
-        requirements = requirements_for(job)
-        job_fp = job_fingerprint(job)
+        job_input = await self.advanced.job_input(user, job)
+        job_fp = job_fingerprint(
+            job,
+            intelligence_extractor_version=job_input.extractor_version or "",
+            intelligence_fingerprint=job_input.fingerprint or "",
+        )
         now = datetime.now(timezone.utc)
         recomputed = 0
 
         for resume in resumes:
-            resume_fp = resume_fingerprint(resume)
+            resume_input = await self.advanced.resume_input(user, resume)
+            resume_fp = resume_fingerprint(
+                resume,
+                intelligence_extractor_version=resume_input.extractor_version or "",
+                intelligence_fingerprint=resume_input.fingerprint or "",
+            )
             row = existing.get(resume.id)
             if (
                 row is not None
@@ -340,9 +374,12 @@ class MatchingService:
                 and row.resume_fingerprint == resume_fp
             ):
                 continue
-            result = match_resume(
-                requirements,
-                build_resume_profile(resume),
+            result = self.advanced.evaluate(
+                job,
+                resume,
+                profile=build_resume_profile(resume),
+                job_input=job_input,
+                resume_input=resume_input,
                 as_of=as_of,
             )
             if row is None:

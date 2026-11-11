@@ -176,7 +176,15 @@ class Application(Base, TimestampMixin):
 
     platform: Mapped[str] = mapped_column(String(32), nullable=False)
     platform_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # The employer's actual application form. It may still point at the job
+    # listing until the user supplies the employer's own URL; the preview
+    # reports which one it is instead of pretending they are interchangeable.
     application_url: Mapped[str] = mapped_column(String(1000), nullable=False)
+    # The original discovered listing (for example a Glassdoor posting), kept
+    # for reference even after application_url is replaced.
+    job_listing_url: Mapped[str | None] = mapped_column(String(1000))
+    # Optional employer careers page, never opened automatically.
+    employer_careers_url: Mapped[str | None] = mapped_column(String(1000))
     automation_mode: Mapped[AutomationMode] = mapped_column(
         _enum_column(AutomationMode, "automation_mode"),
         nullable=False,

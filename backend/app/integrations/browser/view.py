@@ -87,7 +87,7 @@ _PLAYWRIGHT_MISSING_REASON = (
     "persistent employer page in ApplyPilot."
 )
 
-_STREAMING_COMPONENT = "CDP screencast relay (built in; no extra service)"
+_STREAMING_COMPONENT = "CDP screencast streaming relay (built in; no extra service)"
 
 
 class UnavailableBrowserViewProvider:
@@ -116,6 +116,14 @@ class UnavailableBrowserViewProvider:
         return None
 
 
+_DISABLED_REASON = (
+    "Live browser streaming is disabled. Set "
+    "APPLICATION_BROWSER_STREAMING_ENABLED=true to show the persistent employer "
+    "page in ApplyPilot."
+)
+
+_REQUIRED_COMPONENT = _STREAMING_COMPONENT
+
 _STREAM_REASON = (
     "The employer's page is streamed live from the same backend Playwright "
     "session and accepts mouse, keyboard and scroll input from you. Input is "
@@ -142,7 +150,7 @@ class CdpRelayBrowserViewProvider:
             available=self._enabled,
             mode=BrowserViewMode.CDP_RELAY if self._enabled else BrowserViewMode.NONE,
             user_can_interact=self._enabled,
-            reason=_STREAM_REASON if self._enabled else _REASON,
+            reason=_STREAM_REASON if self._enabled else _DISABLED_REASON,
             required_component=None if self._enabled else _REQUIRED_COMPONENT,
         )
 
@@ -163,7 +171,7 @@ def get_browser_view_provider() -> BrowserViewProvider:
     if not settings.APPLICATION_BROWSER_STREAMING_ENABLED:
         return UnavailableBrowserViewProvider(
             reason=_STREAMING_DISABLED_REASON,
-            required_component="APPLICATION_BROWSER_STREAMING_ENABLED=true",
+            required_component=_STREAMING_COMPONENT,
         )
     if find_spec("playwright") is None:
         return UnavailableBrowserViewProvider(

@@ -56,6 +56,13 @@ from app.services.application_adapters import (
     ApplicationPlatformAdapter,
     adapter_for_url,
 )
+from app.services.application_platforms import (
+    ApplicationUrlError,
+    detect_platform,
+    is_job_board_url,
+    normalize_application_url,
+    suggest_employer_application_url,
+)
 from app.services.application_questionnaire import (
     SECTION_LABELS,
     SECTION_ORDER,
@@ -70,14 +77,27 @@ from app.services.application_state import (
     ApplicationStateError,
     transition,
 )
-from app.services.application_url_security import sanitize_url_for_display
+from app.services.application_url_security import (
+    sanitize_url_for_display,
+    validate_application_destination,
+)
 from app.services.candidate_service import CandidateService, is_forbidden_answer_storage
 from app.services.job_service import JobService
-from app.services.matching_service import MatchingService
+from app.services.resume_comparison_service import (
+    RESUME_READY,
+    ResumeComparisonService,
+)
+from app.services.resume_recommendation_service import RecommendationOutcome
 from app.services.resume_service import ResumeService
 from app.services.resume_storage import get_resume_storage
 
 logger = get_logger(__name__)
+
+#: Persisted ``resume_reason`` marker meaning the user explicitly chose the
+#: resume. It is compared exactly so a later analysis never replaces that choice.
+MANUAL_RESUME_SELECTION_REASON = (
+    "Resume selected manually by you for this application."
+)
 
 MANUAL_STEPS: tuple[str, ...] = (
     "Open the employer's application page in your browser.",
@@ -151,7 +171,6 @@ class ApplicationService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.jobs = JobService(session)
-        self.matching = MatchingService(session)
         self.resumes = ResumeService(session, get_resume_storage())
         self.candidates = CandidateService(CandidateRepository(session))
 
@@ -229,6 +248,9 @@ class ApplicationService:
                 platform=detection.platform.value,
                 platform_name=detection.display_name,
                 application_url=detection.application_url,
+                # Preserve the original discovered listing separately so a later
+                # employer URL never destroys the reference link.
+                job_listing_url=job.job_url,
                 candidate_id=profile.id,
                 status=ApplicationStatus.DRAFT,
             )
@@ -240,6 +262,8 @@ class ApplicationService:
             application.platform = detection.platform.value
             application.platform_name = detection.display_name
             application.application_url = detection.application_url
+            if not application.job_listing_url:
+                application.job_listing_url = job.job_url
             current_questions = list(existing.questions)
 
         # Publish the analysis state before doing the work: inspection can take
@@ -269,9 +293,16 @@ class ApplicationService:
 
         inspection, inspection_note = await self._inspect(adapter, detection, user)
 
-        resume, resume_reason, resume_score = await self._select_resume(
-            user, job, resume_id=resume_id
-        )
+        if self._keeps_manual_resume(existing, resume_id=resume_id):
+            # Re-analysis must never silently replace a resume the user chose.
+            assert existing is not None and existing.resume_id is not None
+            resume = await self.resumes.get_resume(user, existing.resume_id)
+            resume_reason = MANUAL_RESUME_SELECTION_REASON
+            resume_score = existing.resume_score
+        else:
+            resume, resume_reason, resume_score = await self._select_resume(
+                user, job, resume_id=resume_id
+            )
         reusable_answers = [
             answer
             for answer in (profile.application_answers or [])
@@ -348,14 +379,62 @@ class ApplicationService:
         return await self.get_application(user, application.id)
 
     async def set_application_url(
-        self, user: User, application_id: UUID, application_url: str
+        self,
+        user: User,
+        application_id: UUID,
+        application_url: str,
+        *,
+        employer_careers_url: str | None = None,
     ) -> Application:
-        """Re-inspect an application after the user supplies the employer URL."""
+        """Store the employer's own application URL and re-inspect the form.
+
+        The URL passes the same static validation and DNS/public-address check
+        the browser session uses, and a job-board link is rejected with a
+        specific error instead of being stored as the application form.
+        """
         application = await self.get_application(user, application_id)
+        if application.status in UNREANALYZABLE_STATUSES:
+            raise ApplicationStateError(
+                "This application was already submitted or handed over for manual "
+                "submission and its URL cannot be changed.",
+                code="application_finalized",
+            )
+
+        normalized = normalize_application_url(application_url)
+        if is_job_board_url(normalized):
+            raise InvalidOperationError(
+                "This link points to a job board. Add the employer's own application "
+                "URL before starting a browser session.",
+                code="job_board_url_not_supported",
+            )
+        # Resolve and reject private/loopback destinations before the URL is
+        # stored or inspected by a browser. The session start repeats this and
+        # pins the validated address into Chromium's resolver.
+        normalized, _ = await validate_application_destination(normalized)
+
+        careers = application.employer_careers_url
+        if employer_careers_url is not None:
+            raw_careers = employer_careers_url.strip()
+            if raw_careers:
+                careers = normalize_application_url(raw_careers)
+                if is_job_board_url(careers):
+                    raise InvalidOperationError(
+                        "The employer careers URL must be the employer's own page, "
+                        "not a job board.",
+                        code="job_board_url_not_supported",
+                    )
+            else:
+                careers = None
+
+        if not application.job_listing_url:
+            application.job_listing_url = application.job.job_url or application.application_url
+        application.employer_careers_url = careers
+        await self.session.commit()
+
         return await self.analyze_job(
             user,
             application.job_id,
-            application_url=application_url,
+            application_url=normalized,
         )
 
     async def _inspect(
@@ -407,29 +486,89 @@ class ApplicationService:
             and not detection.is_job_board_link
         )
 
+    @staticmethod
+    def _keeps_manual_resume(
+        existing: Application | None, *, resume_id: UUID | None
+    ) -> bool:
+        """Whether a stored explicit selection must survive this analysis."""
+        return bool(
+            resume_id is None
+            and existing is not None
+            and existing.resume_id is not None
+            and existing.resume_reason == MANUAL_RESUME_SELECTION_REASON
+        )
+
     async def _select_resume(
         self, user: User, job: Job, *, resume_id: UUID | None
     ) -> tuple[Resume | None, str, float | None]:
-        """Pick the best-matching resume, unless the user chose one explicitly."""
+        """Pick the recommended resume, unless the user chose one explicitly.
+
+        The comparison/recommendation service is the same one exposed by the
+        jobs API, so application preparation cannot drift from the comparison
+        shown elsewhere. When no resume has enough evidence for a confident
+        recommendation, the existing ``rows[0]`` fallback is preserved and its
+        reason says explicitly that it is not a confident recommendation.
+        """
         if resume_id is not None:
             resume = await self.resumes.get_resume(user, resume_id)
-            return resume, "Resume selected manually by you for this application.", None
+            return resume, MANUAL_RESUME_SELECTION_REASON, None
 
-        await self.matching.ensure_job_matches(user, job)
-        rows = await self.matching.get_job_matches(user, job)
-        if not rows:
+        outcome = await ResumeComparisonService(self.session).compare(user, job.id)
+        recommendation = outcome.recommendation
+        if recommendation is not None and recommendation.recommended is not None:
+            best = recommendation.recommended
+            # Re-check ownership through the existing resume service.
+            resume = await self.resumes.get_resume(user, best.resume_id)
             return (
-                None,
-                "No PDF resume is available. Upload one to include it in this application.",
-                None,
+                resume,
+                self._recommendation_reason(best, recommendation),
+                best.overall_score,
             )
-        best = rows[0]
-        filename = best.resume.original_filename if best.resume else "resume.pdf"
-        reason = (
-            f"Recommended by the matching engine: {best.overall_score}% compatibility "
-            f"for {filename}. {best.explanation}"
-        ).strip()
-        return best.resume, reason, best.overall_score
+
+        ranked = [entry for entry in outcome.entries if entry.row is not None]
+        if ranked:
+            entry = ranked[0]
+            resume = await self.resumes.get_resume(user, entry.resume_id)
+            reason = (
+                "Selected as the highest stored compatibility result, but no "
+                "resume had enough usable evidence for a confident recommendation. "
+                "Review this selection before continuing."
+            )
+            return resume, reason, entry.overall_score
+        return (
+            None,
+            "No PDF resume is available. Upload one to include it in this application.",
+            None,
+        )
+
+    @staticmethod
+    def _recommendation_reason(best: Any, recommendation: RecommendationOutcome) -> str:
+        """Summarise the recommendation for the persisted preview reason."""
+        parts = [
+            "Recommended by resume comparison: "
+            f"{(best.overall_score or 0.0):.1f}% compatibility for "
+            f"{best.resume_title}."
+        ]
+        if recommendation.confidence:
+            parts.append(f"Recommendation confidence: {recommendation.confidence}.")
+        if recommendation.close_call:
+            parts.append(
+                "Another resume is within the close-call threshold, so this is a "
+                "preference rather than a clear winner."
+            )
+        if best.state != RESUME_READY:
+            parts.append(
+                "Resume analysis is not current for every resume, so this selection "
+                "uses the stored parsed resume data; run resume analysis to improve "
+                "confidence."
+            )
+        if recommendation.alternatives:
+            alternative = recommendation.alternatives[0]
+            parts.append(
+                f"Close alternative: {alternative.resume_title} "
+                f"({alternative.score_difference:g} points lower)."
+            )
+        return " ".join(parts)
 
     async def _sync_questions(
         self,
@@ -788,7 +927,7 @@ class ApplicationService:
         resume = await self.resumes.get_resume(user, resume_id)
         application.resume_id = resume.id
         application.resume_filename = resume.original_filename
-        application.resume_reason = "Resume selected manually by you for this application."
+        application.resume_reason = MANUAL_RESUME_SELECTION_REASON
         application.resume_score = None
 
         for question in application.questions:
@@ -836,6 +975,13 @@ class ApplicationService:
             "platform": application.platform,
             "platform_name": application.platform_name,
             "application_url": application.application_url,
+            "job_listing_url": application.job_listing_url
+            or (application.job.job_url if application.job else None),
+            "employer_careers_url": application.employer_careers_url,
+            "application_url_is_job_board": self._application_url_is_job_board(
+                application.application_url
+            ),
+            "suggested_application_url": self._suggest_application_url(application),
             "automation_mode": application.automation_mode.value,
             "inspection_mode": application.inspection_mode.value,
             "status": application.status.value,
@@ -875,6 +1021,27 @@ class ApplicationService:
             "manual_steps": list(MANUAL_STEPS),
             "warnings": self._warnings(application, missing),
         }
+
+    @staticmethod
+    def _application_url_is_job_board(url: str | None) -> bool:
+        if not url:
+            return False
+        try:
+            return detect_platform(url).is_job_board_link
+        except ApplicationUrlError:
+            return False
+
+    @staticmethod
+    def _suggest_application_url(application: Application) -> str | None:
+        """Offer a URL found in trusted listing text; it still needs validation."""
+        if not ApplicationService._application_url_is_job_board(application.application_url):
+            return None
+        job = application.job
+        if job is None:
+            return None
+        return suggest_employer_application_url(
+            job.job_description, listing_url=job.job_url
+        )
 
     def _question_payload(self, question: ApplicationQuestion) -> dict[str, Any]:
         return {
@@ -924,6 +1091,11 @@ class ApplicationService:
             warnings.append(
                 "Legal declarations must be read and confirmed by you; they are never "
                 "auto-filled."
+            )
+        if self._application_url_is_job_board(application.application_url):
+            warnings.append(
+                "This link is a job listing, not the employer's application form. "
+                "Add the employer's own application URL before opening a browser."
             )
         return warnings
 
