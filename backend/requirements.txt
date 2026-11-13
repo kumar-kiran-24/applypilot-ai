@@ -36,6 +36,15 @@ pypdf==6.1.3
 beautifulsoup4==4.13.5
 lxml==6.0.2
 
+# --- Browser automation (Phase 2E/2H) ---------------------------------------
+# Real Chromium drives the live browser view and the Easy Apply hand-off. The
+# browser binary is not a pip package: deploy/scripts/install.sh runs
+# `python -m playwright install chromium` into PLAYWRIGHT_BROWSERS_PATH after
+# this file is installed. Keep the pin: `playwright install` fetches the
+# Chromium revision that matches this driver version, so an unpinned upgrade
+# on a staging host silently changes the browser build.
+playwright==1.64.1
+
 # --- Configuration -----------------------------------------------------------
 python-dotenv==1.1.1
 
@@ -49,4 +58,3 @@ groq==0.33.0
 # huggingface-hub==0.36.0
 # langgraph==1.0.2
 # redis==8.1.0
-# playwright==<installed version>

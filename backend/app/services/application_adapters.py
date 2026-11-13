@@ -476,6 +476,37 @@ class SmartRecruitersAdapter(ApplicationPlatformAdapter):
     )
 
 
+class IndeedSmartApplyAdapter(ApplicationPlatformAdapter):
+    """Indeed SmartApply forms, usually reached from a Glassdoor Easy Apply."""
+
+    spec = _SPEC_BY_PLATFORM[ApplicationPlatform.INDEED_SMARTAPPLY]
+    selectors = FormSelectors(
+        form="form, [data-testid*='application'], main",
+        resume_input=(
+            "input[type=file][name*='resume'], input[type=file][accept*='pdf'], "
+            "input[type=file]"
+        ),
+        login_marker=(
+            "input[type=password], a[href*='login'], a[href*='signin'], "
+            "button:has-text('Sign in'), button:has-text('Log in')"
+        ),
+        account_marker="a[href*='register'], button:has-text('Create account')",
+    )
+    declared_fields = (
+        FormFieldSpec(
+            question_key="documents.resume",
+            question_text="Resume",
+            field_type=QuestionType.FILE,
+            section=SECTION_DOCUMENTS,
+            required=True,
+            help_text=(
+                "Indeed SmartApply starts at a resume-selection step. Only a "
+                "resume you explicitly approved is attached."
+            ),
+        ),
+    )
+
+
 class WorkdayAdapter(ApplicationPlatformAdapter):
     """Workday: multi-step, account-gated; guided manually."""
 
@@ -515,6 +546,7 @@ _ADAPTERS: dict[ApplicationPlatform, ApplicationPlatformAdapter] = {
         LeverAdapter(),
         AshbyAdapter(),
         SmartRecruitersAdapter(),
+        IndeedSmartApplyAdapter(),
         WorkdayAdapter(),
         ICIMSAdapter(),
         CompanyHostedAdapter(),
@@ -579,6 +611,7 @@ __all__ = [
     "FormSelectors",
     "GreenhouseAdapter",
     "ICIMSAdapter",
+    "IndeedSmartApplyAdapter",
     "LeverAdapter",
     "SmartRecruitersAdapter",
     "UploadReport",

@@ -8,6 +8,7 @@ from app.api.v1.endpoints import (
     application_fill,
     application_human_loop,
     applications,
+    assistant,
     auth,
     auto_apply,
     browser_sessions,
@@ -35,6 +36,7 @@ api_router.include_router(resumes.router)
 api_router.include_router(jobs.router)
 api_router.include_router(matching.router)
 api_router.include_router(applications.router)
+api_router.include_router(assistant.router)
 api_router.include_router(missing_information.router)
 api_router.include_router(auto_apply.router)
 api_router.include_router(browser_sessions.router)

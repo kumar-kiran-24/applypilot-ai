@@ -120,9 +120,11 @@ class ApplicationFormService:
             if question.status is QuestionStatus.CONFIRMED and question.answer
         }
 
+        page_url = sanitize_url_for_display(await handle.current_url())
         try:
             result = await self.analyzer.analyze_page(
                 handle,
+                page_url=page_url,
                 candidate=profile,
                 resume=application.resume,
                 reusable_answers=reusable_answers,
@@ -141,7 +143,6 @@ class ApplicationFormService:
             )
             raise FormAnalysisUnavailableError() from exc
 
-        page_url = sanitize_url_for_display(await handle.current_url())
         now = _utcnow()
         version = await self._next_version(application.id)
         fields = [field.model_dump(mode="json") for field in result.fields]
@@ -248,6 +249,11 @@ class ApplicationFormService:
     @staticmethod
     def _summary(result: FormAnalysisResult) -> dict[str, Any]:
         return {
+            "application_step": result.application_step,
+            "step_supported": result.step_supported,
+            "application_platform": (
+                "indeed_smartapply" if result.smartapply else None
+            ),
             "visible_field_count": sum(1 for item in result.fields if item.visible),
             "requires_human_input_count": result.requires_human_input_count,
             "automation_eligible_count": result.automation_eligible_count,
@@ -272,6 +278,9 @@ class ApplicationFormService:
             analyzed_at=row.analyzed_at,
             form_count=row.form_count,
             field_count=row.field_count,
+            application_step=summary.get("application_step"),
+            step_supported=bool(summary.get("step_supported", False)),
+            application_platform=summary.get("application_platform"),
             visible_field_count=int(summary.get("visible_field_count", 0)),
             requires_human_input_count=int(
                 summary.get("requires_human_input_count", 0)

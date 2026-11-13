@@ -27,6 +27,7 @@ import contextlib
 import re
 import time
 import uuid
+from functools import partial
 from typing import Protocol
 from urllib.parse import urlsplit
 
@@ -78,6 +79,15 @@ class PersistentBrowserHandle(Protocol):
     @property
     def unsafe_navigation(self) -> bool:
         """True when the page attempted to leave the approved origins."""
+        ...
+
+    @property
+    def blocked_navigation(self) -> bool:
+        """True when a listing hand-off tried an unapproved destination.
+
+        This is distinct from a compromised session: the listing page is still
+        loaded, the navigation was aborted, and the user can continue manually.
+        """
         ...
 
     @property
@@ -249,11 +259,17 @@ class _PlaywrightHandle:
         self._policy = policy
         self._closed = False
         self._unsafe_navigation = False
+        self._blocked_navigation = False
         self._interaction_lock = asyncio.Lock()
         self._last_user_input = 0.0
         self._navigation_epoch = 0
         self._last_main_url = ""
         self._cdp: object | None = None
+        # Easy Apply may legitimately open the form in a new tab. In a listing
+        # hand-off, allowed popups are prepared and adopted as the active page;
+        # unapproved popups are still aborted/closed and never used.
+        self._pending_pages: set[object] = set()
+        self._prepared_pages: set[object] = set()
         context.on("page", self._on_new_page)  # type: ignore[attr-defined]
         page.on("framenavigated", self._on_navigated)  # type: ignore[attr-defined]
         page.on("popup", self._on_popup)  # type: ignore[attr-defined]
@@ -274,15 +290,29 @@ class _PlaywrightHandle:
         if self._is_allowed(url):
             await route.continue_()  # type: ignore[attr-defined]
             return
-        self._unsafe_navigation = True
+        self._mark_disallowed_navigation()
         logger.warning(
             "Blocked browser navigation outside the approved origins",
             extra={
                 "stage": "browser_navigation_guard",
                 "host": (urlsplit(url).hostname or "")[:200],
+                "redirect_flow": self._policy.redirect_flow,
             },
         )
         await route.abort("blockedbyclient")  # type: ignore[attr-defined]
+
+    def _mark_disallowed_navigation(self) -> None:
+        """Record a refused destination without condemning the whole session.
+
+        During a listing hand-off the user may click a button that opens an
+        unsupported site. The guard aborts that navigation and records it as
+        ``blocked_navigation`` so the API can say "unsupported application
+        platform". Any other escape still marks the session unsafe.
+        """
+        if self._policy.redirect_flow:
+            self._blocked_navigation = True
+        else:
+            self._unsafe_navigation = True
 
     async def _on_navigated(self, frame: object) -> None:
         page = self._page
@@ -299,25 +329,94 @@ class _PlaywrightHandle:
             self._last_main_url = url
             self._navigation_epoch += 1
         if not self._is_allowed(url):
-            self._unsafe_navigation = True
+            self._mark_disallowed_navigation()
             logger.warning(
                 "Browser session left its approved origin",
                 extra={"stage": "browser_navigation_violation"},
             )
 
     async def _on_new_page(self, page: object) -> None:
-        """Only the main page is allowed; popups are closed immediately."""
+        """Attach the guard to the main page, or prepare an allowed popup."""
         if page is self._page:
             await page.route("**/*", self.guard_route)  # type: ignore[attr-defined]
             return
-        self._unsafe_navigation = True
-        with contextlib.suppress(Exception):
-            await page.close()  # type: ignore[attr-defined]
+        if not self._policy.redirect_flow:
+            self._mark_disallowed_navigation()
+            with contextlib.suppress(Exception):
+                await page.close()  # type: ignore[attr-defined]
+            return
+        await self._prepare_pending_page(page)
 
     async def _on_popup(self, popup: object) -> None:
-        self._unsafe_navigation = True
+        """Handle a popup discovered through the opener page."""
+        if popup is self._page or popup in self._prepared_pages:
+            return
+        if self._policy.redirect_flow:
+            await self._prepare_pending_page(popup)
+            return
+        self._mark_disallowed_navigation()
         with contextlib.suppress(Exception):
             await popup.close()  # type: ignore[attr-defined]
+
+    async def _prepare_pending_page(self, page: object) -> None:
+        """Guard a new tab before its first request and wait for its URL."""
+        if page is self._page or page in self._prepared_pages:
+            return
+        self._prepared_pages.add(page)
+        self._pending_pages.add(page)
+        with contextlib.suppress(Exception):
+            await page.route("**/*", self.guard_route)  # type: ignore[attr-defined]
+        with contextlib.suppress(Exception):
+            page.on(  # type: ignore[attr-defined]
+                "framenavigated", partial(self._on_pending_navigated, page)
+            )
+            page.on("popup", self._on_popup)  # type: ignore[attr-defined]
+            page.on("close", lambda _ignored: self._pending_pages.discard(page))  # type: ignore[attr-defined]
+        url = getattr(page, "url", "")
+        if url and url != "about:blank":
+            await self._adopt_or_block(page, str(url))
+
+    async def _on_pending_navigated(self, page: object, frame: object) -> None:
+        """Adopt a popup only once its main frame reaches an approved URL."""
+        if page not in self._pending_pages or page is self._page:
+            return
+        try:
+            is_main = frame == page.main_frame  # type: ignore[attr-defined]
+        except Exception:  # pragma: no cover - defensive
+            is_main = False
+        if not is_main:
+            return
+        url = getattr(frame, "url", "")
+        if not url or url == "about:blank":
+            return
+        await self._adopt_or_block(page, str(url))
+
+    async def _adopt_or_block(self, page: object, url: str) -> None:
+        """Make an allowed popup the active page; close an unapproved one."""
+        if page is self._page:
+            return
+        if not self._is_allowed(url):
+            self._mark_disallowed_navigation()
+            self._pending_pages.discard(page)
+            logger.warning(
+                "Closed a popup outside the approved destinations",
+                extra={"stage": "browser_popup_guard"},
+            )
+            with contextlib.suppress(Exception):
+                await page.close()  # type: ignore[attr-defined]
+            return
+        self._pending_pages.discard(page)
+        self._page = page
+        self._navigation_epoch += 1
+        self._last_main_url = url
+        # A CDP session is bound to one page; recreate it for the new tab.
+        self._cdp = None
+        with contextlib.suppress(Exception):
+            page.on("framenavigated", self._on_navigated)  # type: ignore[attr-defined]
+        logger.info(
+            "Adopted an approved Easy Apply tab",
+            extra={"stage": "browser_popup_adopt"},
+        )
 
     def _is_allowed(self, url: str) -> bool:
         if url == "about:blank":
@@ -657,6 +756,10 @@ class _PlaywrightHandle:
     def unsafe_navigation(self) -> bool:
         return self._unsafe_navigation
 
+    @property
+    def blocked_navigation(self) -> bool:
+        return self._blocked_navigation
+
     async def close(self) -> None:
         if self._closed:
             return
@@ -721,7 +824,10 @@ class PlaywrightPersistentBrowserDriver:
                 self._settings.APPLICATION_BROWSER_TIMEOUT_MS
             )
             handle = _PlaywrightHandle(playwright, browser, context, page, policy)
-            await page.route("**/*", handle.guard_route)
+            # Context-level routing covers every tab, including a popup's very
+            # first request. A page-level route attached after the popup opens
+            # is too late: the initial navigation can already be in flight.
+            await context.route("**/*", handle.guard_route)
             try:
                 await page.goto(url, wait_until="domcontentloaded")
             except Exception as exc:

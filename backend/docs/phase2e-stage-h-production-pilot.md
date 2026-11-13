@@ -76,21 +76,29 @@ sudo DOMAIN=app.example.com \
 
 The script:
 
-1. Installs Python, Nginx, Certbot, git, UFW and build tools.
-2. Creates the `applypilot` system user and `/var/lib/applypilot`
+1. Installs Python, Nginx, Certbot, git, UFW, `postgresql-client` (for
+   `pg_dump`/`pg_restore`) and build tools, then Node.js 22 if needed.
+2. Creates the `applypilot` system user, then `/opt/applypilot` owned by that
+   user (so it can clone and create `.venv`), plus `/var/lib/applypilot`
    (`resumes/`, `screenshots/`, `ms-playwright/`).
 3. Clones the repo to `/opt/applypilot`, builds the venv, installs
-   `requirements.txt`, and installs Chromium **with the same `HOME` and
-   `PLAYWRIGHT_BROWSERS_PATH`** the unit uses.
+   `requirements.txt` (Playwright is pinned there), and installs Chromium
+   **with the same `HOME` and `PLAYWRIGHT_BROWSERS_PATH`** the unit uses, then
+   verifies a real launch.
 4. Creates `/etc/applypilot/{backend,frontend}.env` at mode `0600`.
 5. Runs `verify_secrets.py --environment production` and aborts on failure.
 6. Runs `alembic upgrade head`.
-7. Builds the Next.js app with `npm ci && npm run build`.
-8. Installs the systemd units and obtains a Let's Encrypt certificate
-   (`certbot certonly --standalone`).
-9. Installs the templated Nginx site (domain + monitoring CIDR substituted),
-   runs `nginx -t`, reloads Nginx, configures UFW.
-10. Starts both services and checks `/health` and `/ready` over HTTPS.
+7. Builds the Next.js app with `npm ci && npm run build`, loading
+   `/etc/applypilot/frontend.env` first so `NEXT_PUBLIC_*` is inlined.
+8. Installs the systemd units and configures UFW (22/80/443) before any
+   certificate request.
+9. Obtains a Let's Encrypt certificate with the HTTP-01 **webroot**
+   authenticator through a temporary ACME-only Nginx vhost
+   (`certbot certonly --webroot`), so no run ever needs to stop Nginx; installs
+   the renewal hook and enables `certbot.timer`.
+10. Installs the templated Nginx site (domain + monitoring CIDR substituted),
+    runs `nginx -t`, reloads Nginx, starts both services and checks `/health`
+    and `/ready` over HTTPS.
 
 ### 3.1 Environment configuration
 
@@ -127,11 +135,20 @@ pinning, disabled rate limiting, and metrics without a token.
 * `/api/v1/metrics` restricted to loopback plus `MONITORING_CIDR`.
 * `/docs`, `/redoc`, `/openapi.json` return 404 even if the backend were
   misconfigured.
-* Access logs use `$uri` (not `$request`) and add `X-Request-ID`, so query
-  strings carrying one-time codes are never written to disk.
+* Access logs use a named `applypilot` format with `$uri` (never `$request` or
+  `$request_uri`) plus status, `$request_time`, `$upstream_response_time` and
+  `$request_id`, so query strings carrying one-time codes are never written to
+  disk.
+* Security headers are emitted exactly once: Nginx sets them and hides the
+  upstream copies with `proxy_hide_header`. `Content-Security-Policy` stays
+  upstream-owned because the API and the pages need different policies.
 
-Renewal is Certbot's default systemd timer; `deploy/scripts/smoke-test.sh`
-fails if the certificate has less than 14 days left.
+Renewal is `certbot.timer` using the webroot authenticator recorded in
+`/etc/letsencrypt/renewal/<domain>.conf`, so it never competes with Nginx for
+port 80. `/etc/letsencrypt/renewal-hooks/deploy/10-reload-nginx.sh` validates the
+configuration and reloads Nginx after a successful renewal.
+`deploy/scripts/smoke-test.sh` fails if the certificate has less than 14 days
+left. Verify with `certbot renew --dry-run` (staging, no rate-limit cost).
 
 ### 3.3 systemd and resource limits
 
@@ -143,8 +160,11 @@ cgroup is killed. Hardening: `NoNewPrivileges`, `PrivateTmp`,
 `RestrictSUIDSGID`, `LockPersonality`, `RestrictAddressFamilies`, `UMask=0077`.
 `MemoryMax=6G` matches the 8-session ceiling measured below.
 
-The frontend unit runs `next start`, writes only to `.next/cache`, and is capped
-at 1 GB.
+The frontend unit runs `next start`, writes only to `/var/lib/applypilot` (its
+`HOME`) and `.next/cache`, and is capped at 1 GB. `ProtectHome=true` hides
+`/home` and `/root`, so `HOME` is an explicitly managed writable path, and
+`ExecStartPre=+/usr/bin/install -d ...` guarantees `.next/cache` exists before
+startup.
 
 ### 3.4 Firewall / egress
 

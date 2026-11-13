@@ -23,7 +23,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -42,8 +42,13 @@ from app.models.application import (
     AutomationMode,
     QuestionStatus,
     QuestionType,
+    RedirectStatus,
 )
-from app.models.application_answer import AnswerType, VerificationStatus
+from app.models.application_answer import (
+    AnswerType,
+    ApplicationAnswer,
+    VerificationStatus,
+)
 from app.models.candidate import Candidate
 from app.models.job import Job
 from app.models.resume import Resume
@@ -52,6 +57,7 @@ from app.repositories.candidate_repository import CandidateRepository
 from app.schemas.application_answer import ApplicationAnswerUpdate
 from app.schemas.candidate import CandidateUpdate
 from app.schemas.preference import JobPreferenceUpdate
+from app.services.answer_library import AnswerLibrary, ReuseSuggestion
 from app.services.application_adapters import (
     ApplicationPlatformAdapter,
     adapter_for_url,
@@ -69,6 +75,7 @@ from app.services.application_questionnaire import (
     QuestionDefinition,
     apply_resume_selection,
     build_questionnaire,
+    profile_answers,
 )
 from app.services.application_state import (
     EDITABLE_STATUSES,
@@ -83,6 +90,7 @@ from app.services.application_url_security import (
 )
 from app.services.candidate_service import CandidateService, is_forbidden_answer_storage
 from app.services.job_service import JobService
+from app.services.job_understanding_service import JobUnderstandingService
 from app.services.resume_comparison_service import (
     RESUME_READY,
     ResumeComparisonService,
@@ -126,6 +134,18 @@ class SubmissionOutcome:
     message: str
     reference: str | None = None
     steps: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PipelineCounts:
+    """Backend-computed application pipeline totals for the dashboard."""
+
+    total: int
+    in_progress: int
+    submitted: int
+    failed: int
+    cancelled: int
+    by_stage: dict[str, int]
 
 
 def approval_fingerprint(
@@ -175,6 +195,70 @@ class ApplicationService:
         self.candidates = CandidateService(CandidateRepository(session))
 
     # --- Reads ---------------------------------------------------------------
+    async def pipeline_counts(self, user: User) -> PipelineCounts:
+        """Aggregate the user's applications by stored status and stage.
+
+        One grouped query per column keeps the dashboard free of N+1 reads and
+        makes the stored columns the single source of truth for the pipeline.
+        """
+        status_rows = await self.session.execute(
+            select(Application.status, func.count(Application.id))
+            .where(Application.user_id == user.id)
+            .group_by(Application.status)
+        )
+        by_status = {
+            (status.value if hasattr(status, "value") else str(status)): int(count)
+            for status, count in status_rows.all()
+        }
+
+        stage_rows = await self.session.execute(
+            select(Application.stage, func.count(Application.id))
+            .where(Application.user_id == user.id, Application.stage.is_not(None))
+            .group_by(Application.stage)
+        )
+        by_stage = {stage.value: 0 for stage in ApplicationStage}
+        for stage, count in stage_rows.all():
+            by_stage[stage.value if hasattr(stage, "value") else str(stage)] = int(count)
+
+        pre_submission = {
+            ApplicationStatus.DRAFT,
+            ApplicationStatus.ANALYZING,
+            ApplicationStatus.AWAITING_USER_INFORMATION,
+            ApplicationStatus.READY_FOR_REVIEW,
+            ApplicationStatus.AWAITING_APPROVAL,
+            ApplicationStatus.SUBMITTING,
+            ApplicationStatus.NEEDS_USER_ACTION,
+        }
+        return PipelineCounts(
+            total=sum(by_status.values()),
+            in_progress=sum(
+                count
+                for status, count in by_status.items()
+                if status in {value.value for value in pre_submission}
+            ),
+            submitted=by_status.get(ApplicationStatus.SUBMITTED.value, 0),
+            failed=by_status.get(ApplicationStatus.FAILED.value, 0),
+            cancelled=by_status.get(ApplicationStatus.CANCELLED.value, 0),
+            by_stage=by_stage,
+        )
+
+    async def recent_applications(
+        self, user: User, *, limit: int = 5
+    ) -> list[Application]:
+        """Most recently updated applications, with the rows `_summary` needs."""
+        rows = await self.session.scalars(
+            select(Application)
+            .where(Application.user_id == user.id)
+            .options(
+                selectinload(Application.job),
+                selectinload(Application.questions),
+                selectinload(Application.resume),
+            )
+            .order_by(Application.updated_at.desc(), Application.created_at.desc())
+            .limit(limit)
+        )
+        return list(rows.all())
+
     async def list_applications(self, user: User) -> list[Application]:
         rows = await self.session.scalars(
             select(Application)
@@ -239,6 +323,12 @@ class ApplicationService:
         profile = await self.candidates.ensure_profile_for_user(user)
         target_url = application_url or (existing.application_url if existing else job.job_url)
         adapter, detection = adapter_for_url(target_url)
+        # A listing (for example Glassdoor) is a supported starting page for an
+        # Easy Apply hand-off. Its original URL is never replaced by the form.
+        listing_flow = detection.is_job_board_link
+        keep_validated_redirect = bool(
+            existing is not None and listing_flow and existing.destination_validated
+        )
 
         if existing is None:
             application = Application(
@@ -253,17 +343,32 @@ class ApplicationService:
                 job_listing_url=job.job_url,
                 candidate_id=profile.id,
                 status=ApplicationStatus.DRAFT,
+                redirect_status=RedirectStatus.NOT_STARTED,
             )
             self.session.add(application)
             current_questions: list[ApplicationQuestion] = []
         else:
             application = existing
             application.candidate_id = profile.id
-            application.platform = detection.platform.value
-            application.platform_name = detection.display_name
-            application.application_url = detection.application_url
+            if keep_validated_redirect:
+                # Re-analysis must not demote a validated Indeed SmartApply
+                # destination back to the job listing.
+                application.application_url = application.application_url or (
+                    detection.application_url
+                )
+            else:
+                application.platform = detection.platform.value
+                application.platform_name = detection.display_name
+                application.application_url = detection.application_url
             if not application.job_listing_url:
                 application.job_listing_url = job.job_url
+            if not listing_flow:
+                # A direct employer form replaces any earlier listing hand-off.
+                application.application_destination_url = None
+                application.destination_platform = None
+                application.destination_validated = False
+                application.redirect_status = RedirectStatus.NOT_STARTED
+                application.redirect_detected_at = None
             current_questions = list(existing.questions)
 
         # Publish the analysis state before doing the work: inspection can take
@@ -327,21 +432,36 @@ class ApplicationService:
         )
 
         automation_available = self._automation_available(adapter, detection)
-        mode = (
-            AutomationMode.AUTOMATED
-            if automation_available
-            else AutomationMode.ASSISTED
-            if adapter.supports_automation
-            else AutomationMode.MANUAL
-        )
+        if listing_flow:
+            mode = (
+                AutomationMode.ASSISTED
+                if settings.APPLICATION_AUTOMATION_ENABLED
+                else AutomationMode.MANUAL
+            )
+        else:
+            mode = (
+                AutomationMode.AUTOMATED
+                if automation_available
+                else AutomationMode.ASSISTED
+                if adapter.supports_automation
+                else AutomationMode.MANUAL
+            )
 
         notes = list(inspection.notes)
         if inspection_note:
             notes.append(inspection_note)
-        if detection.is_job_board_link:
+        if listing_flow:
+            source = detection.listing_source or "job board"
             notes.append(
-                "Add the employer's own application URL to prepare this application."
+                f"This is a {source} job listing with Easy Apply. Open the live "
+                "browser, click Easy Apply yourself, and ApplyPilot will detect "
+                "and validate where it goes. The listing URL stays unchanged."
             )
+            if application.destination_validated:
+                notes.append(
+                    "Application destination already validated: "
+                    f"{application.platform_name}."
+                )
         if adapter.supports_automation and not automation_available:
             notes.append(
                 "Browser automation is disabled, so this application is prepared and "
@@ -662,6 +782,52 @@ class ApplicationService:
             else ApplicationStatus.AWAITING_USER_INFORMATION,
         )
 
+    # --- Reusable answers ----------------------------------------------------
+    async def reusable_suggestions(
+        self, user: User, application_id: UUID, question_id: UUID
+    ) -> tuple[Application, ApplicationQuestion, tuple[ReuseSuggestion, ...]]:
+        """Rank saved answers for one question in this application.
+
+        The user's own saved answers are matched against the question wording
+        and category; the job title and extracted required skills only reorder
+        genuine matches. Conflicts with verified profile data are returned so
+        the UI can refuse to insert them safely. Nothing is written here.
+        """
+        application = await self.get_application(user, application_id)
+        question = next(
+            (item for item in application.questions if item.id == question_id), None
+        )
+        if question is None:
+            raise ResourceNotFoundError("Application question was not found.")
+        if question.is_legal or application.candidate_id is None:
+            return application, question, ()
+
+        answers = await self.candidates.list_answers(application.candidate_id)
+        # The repository loads the candidate's nested records, which the
+        # deterministic profile mapping reads without triggering lazy I/O.
+        profile = await self.candidates.ensure_profile_for_user(user)
+        if profile is None:
+            return application, question, ()
+
+        required_skills: list[str] = []
+        job = application.job
+        if job is not None:
+            understanding = await JobUnderstandingService(
+                self.session
+            ).intelligence_for(user, job)
+            required_skills = list(understanding.fields.required_skills)
+
+        suggestions = AnswerLibrary().reuse_suggestions(
+            question_key=question.question_key,
+            question_text=question.question_text,
+            answers=answers,
+            candidate=profile,
+            profile_values=profile_answers(profile, user),
+            job_title=job.job_title if job is not None else None,
+            job_skills=required_skills,
+        )
+        return application, question, suggestions[:8]
+
     # --- Answering -----------------------------------------------------------
     async def update_question(
         self,
@@ -675,6 +841,7 @@ class ApplicationService:
         store_reusable: bool = True,
         allow_sensitive_reuse: bool = True,
         confirmed_source: AnswerSource | None = None,
+        reused_answer_key: str | None = None,
     ) -> Application:
         """Save or confirm one answer.
 
@@ -682,6 +849,11 @@ class ApplicationService:
         answer confirmed only for this application is not added to the
         reusable bank, and ``confirmed_source`` so confirming a suggestion
         keeps its provenance instead of pretending the user typed it.
+
+        ``reused_answer_key`` records that the value came from a saved reusable
+        answer. The saved answer is looked up for the owning candidate, so a
+        client cannot claim provenance for somebody else's answer, and the
+        provenance survives this application's own confirmation.
         """
         application = await self.get_application(user, application_id)
         if application.status not in EDITABLE_STATUSES:
@@ -694,6 +866,35 @@ class ApplicationService:
         if question is None:
             raise ResourceNotFoundError("Application question was not found.")
 
+        reused: ApplicationAnswer | None = None
+        if reused_answer_key:
+            normalised_reuse = reused_answer_key.strip().lower()
+            if application.candidate_id is None:
+                raise ResourceNotFoundError(
+                    f"No reusable answer is stored for '{normalised_reuse}'."
+                )
+            reused = next(
+                (
+                    item
+                    for item in await self.candidates.list_answers(
+                        application.candidate_id
+                    )
+                    if item.question_key == normalised_reuse
+                ),
+                None,
+            )
+            if reused is None:
+                raise ResourceNotFoundError(
+                    f"No reusable answer is stored for '{normalised_reuse}'."
+                )
+            if reused.is_legal or is_forbidden_answer_storage(
+                reused.question_key, reused.question_text
+            ):
+                raise InvalidOperationError(
+                    "That saved answer can never be reused for an application.",
+                    code="forbidden_answer",
+                )
+
         cleaned = (answer or "").strip()
         self._validate_answer(question, cleaned)
         if note is not None:
@@ -703,15 +904,34 @@ class ApplicationService:
         if cleaned and confirmed:
             question.status = QuestionStatus.CONFIRMED
             question.requires_confirmation = False
-            question.answer_source = confirmed_source or AnswerSource.USER_INPUT
+            question.answer_source = (
+                confirmed_source
+                or (
+                    AnswerSource.CONFIRMED_REUSABLE_ANSWER
+                    if reused is not None
+                    else AnswerSource.USER_INPUT
+                )
+            )
             question.confidence = 1.0
             question.last_confirmed_at = _utcnow()
-            if confirmed_source is None:
+            if reused is not None:
+                question.source_record_id = (
+                    f"application_answer:{reused.question_key}"
+                )
+            elif confirmed_source is None:
                 question.source_record_id = None
         elif cleaned:
             question.status = QuestionStatus.SUGGESTED
             question.requires_confirmation = True
-            if cleaned != (question.suggested_answer or ""):
+            if reused is not None:
+                # Reused but not confirmed for this application: keep the
+                # provenance instead of pretending the user typed it.
+                question.answer_source = AnswerSource.CONFIRMED_REUSABLE_ANSWER
+                question.confidence = 0.85
+                question.source_record_id = (
+                    f"application_answer:{reused.question_key}"
+                )
+            elif cleaned != (question.suggested_answer or ""):
                 # A draft the user rewrote is their input, not the source value.
                 question.answer_source = AnswerSource.USER_INPUT
                 question.confidence = 0.5
@@ -978,6 +1198,13 @@ class ApplicationService:
             "job_listing_url": application.job_listing_url
             or (application.job.job_url if application.job else None),
             "employer_careers_url": application.employer_careers_url,
+            "application_destination_url": application.application_destination_url,
+            "destination_platform": application.destination_platform,
+            "destination_validated": application.destination_validated,
+            "redirect_status": application.redirect_status.value,
+            "redirect_flow": self._application_url_is_job_board(
+                application.application_url
+            ),
             "application_url_is_job_board": self._application_url_is_job_board(
                 application.application_url
             ),
@@ -1093,10 +1320,18 @@ class ApplicationService:
                 "auto-filled."
             )
         if self._application_url_is_job_board(application.application_url):
-            warnings.append(
-                "This link is a job listing, not the employer's application form. "
-                "Add the employer's own application URL before opening a browser."
-            )
+            if application.destination_validated:
+                warnings.append(
+                    "The application form was detected and validated as "
+                    f"{application.destination_platform or application.platform_name}. "
+                    "The original listing URL is preserved."
+                )
+            else:
+                warnings.append(
+                    "This application starts from a job listing. Open the live "
+                    "browser, click Easy Apply yourself, then detect and validate "
+                    "the destination before analysing the form."
+                )
         return warnings
 
     async def approve(self, user: User, application_id: UUID, *, approved: bool) -> Application:

@@ -15,6 +15,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.serializers import answer_conflict_response
 from app.core.dependencies import get_authenticated_user
 from app.db.session import get_db
 from app.models.application import Application, QuestionStatus
@@ -22,6 +23,7 @@ from app.models.user import User
 from app.schemas.application import (
     AnalyzeApplicationRequest,
     ApplicationListResponse,
+    ApplicationPipelineResponse,
     ApplicationPreviewResponse,
     ApplicationSummaryResponse,
     ApproveApplicationRequest,
@@ -33,6 +35,10 @@ from app.schemas.application import (
     SubmissionResponse,
     UpdateQuestionRequest,
     UpdateStageRequest,
+)
+from app.schemas.application_answer import (
+    ReusableAnswerSuggestionResponse,
+    ReusableAnswerSuggestionsResponse,
 )
 from app.schemas.application_workflow import ApplicationWorkflowResponse
 from app.schemas.common import ErrorResponse
@@ -152,6 +158,35 @@ async def list_applications(
 
 
 @router.get(
+    "/pipeline",
+    response_model=ApplicationPipelineResponse,
+    summary="Application pipeline for the dashboard",
+    description=(
+        "Aggregates the user's applications by their stored `status` and "
+        "`stage`. The dashboard reads these counts instead of keeping its own "
+        "copy of the lifecycle. `recent` returns the most recently updated "
+        "applications so a card can be opened directly."
+    ),
+    responses=ERROR_RESPONSES,
+)
+async def application_pipeline(
+    current_user: CurrentUser, db: Database
+) -> ApplicationPipelineResponse:
+    service = ApplicationService(db)
+    counts = await service.pipeline_counts(current_user)
+    recent = await service.recent_applications(current_user, limit=5)
+    return ApplicationPipelineResponse(
+        total=counts.total,
+        in_progress=counts.in_progress,
+        submitted=counts.submitted,
+        failed=counts.failed,
+        cancelled=counts.cancelled,
+        by_stage=counts.by_stage,
+        recent=[_summary(application) for application in recent],
+    )
+
+
+@router.get(
     "/{application_id}",
     response_model=ApplicationPreviewResponse,
     summary="Get one application with its questionnaire",
@@ -216,8 +251,70 @@ async def update_question(
         answer=payload.answer,
         confirmed=payload.confirmed,
         note=payload.note,
+        reused_answer_key=payload.reused_answer_key,
     )
     return _preview(service, application)
+
+
+@router.get(
+    "/{application_id}/questions/{question_id}/reusable-answers",
+    response_model=ReusableAnswerSuggestionsResponse,
+    summary="Suggest saved answers for one application question",
+    description=(
+        "Ranks the user's own saved answers for this question. Matching is "
+        "deterministic: an exact key or wording wins, then the same canonical "
+        "field or knowledge category with real word overlap. Conflicts with "
+        "verified profile data are returned with the suggestion and marked as "
+        "unsafe to insert. Nothing is written and the employer's form is never "
+        "touched."
+    ),
+    responses=ERROR_RESPONSES,
+)
+async def suggest_reusable_answers(
+    application_id: ApplicationId,
+    question_id: QuestionId,
+    current_user: CurrentUser,
+    db: Database,
+) -> ReusableAnswerSuggestionsResponse:
+    service = ApplicationService(db)
+    application, question, suggestions = await service.reusable_suggestions(
+        current_user, application_id, question_id
+    )
+    return ReusableAnswerSuggestionsResponse(
+        application_id=application.id,
+        job_id=application.job_id,
+        job_title=application.job.job_title if application.job else "Application",
+        company=application.job.company if application.job else None,
+        question_key=question.question_key,
+        question_text=question.question_text,
+        suggestions=[
+            ReusableAnswerSuggestionResponse(
+                question_key=item.answer.question_key,
+                question_text=item.answer.question_text,
+                answer=str(item.answer.answer or ""),
+                answer_source=item.answer.answer_source,
+                verification_status=item.answer.verification_status,
+                category=item.category,
+                category_label=item.category_label,
+                trust_level=item.trust.level,
+                trust_label=item.trust.label,
+                trust_reason=item.trust.reason,
+                relevance=item.relevance,
+                reason=item.reason,
+                last_confirmed_at=item.answer.last_confirmed_at,
+                updated_at=item.answer.updated_at,
+                requires_review=item.requires_review,
+                safe_to_insert=item.safe_to_insert,
+                is_stale=item.is_stale,
+                freshness_reason=item.freshness_reason,
+                conflicts=[
+                    answer_conflict_response(conflict)
+                    for conflict in item.conflicts
+                ],
+            )
+            for item in suggestions
+        ],
+    )
 
 
 @router.patch(

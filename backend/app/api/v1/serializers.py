@@ -6,6 +6,11 @@ from datetime import datetime, timezone
 
 from app.models.job import Job
 from app.models.job_match import JobResumeMatch
+from app.models.job_state import JobState
+from app.schemas.application_answer import (
+    AnswerConflictResponse,
+    StaleAnswerResponse,
+)
 from app.schemas.job_intelligence import (
     JOB_INTELLIGENCE_DISCLAIMER,
     JobIntelligenceExtraction,
@@ -16,6 +21,7 @@ from app.schemas.matching import (
     JobMatchesResponse,
     JobRequirementsResponse,
     JobResponse,
+    JobUserStateResponse,
     MatchEvidenceResponse,
     MatchScoreBreakdown,
     ResumeMatchResponse,
@@ -26,6 +32,10 @@ from app.schemas.resume_comparison import (
     ResumeComparisonResponse,
     ResumeProcessingFailureResponse,
     ResumeRecommendationResponse,
+)
+from app.services.application_answer_matching import (
+    AnswerConflict,
+    StaleAnswer,
 )
 from app.services.job_requirements import JobRequirements
 from app.services.job_understanding_service import JobIntelligenceResult
@@ -77,6 +87,7 @@ def job_response(
     *,
     best: tuple[JobResumeMatch, int] | None = None,
     requirements: JobRequirements | None = None,
+    state: JobState | None = None,
 ) -> JobResponse:
     requirements = requirements or requirements_for(job)
     best_match = best_match_summary(best[0]) if best is not None else None
@@ -94,6 +105,12 @@ def job_response(
         requirements=_requirements_payload(requirements),
         best_match=best_match,
         matches_count=int(best[1]) if best is not None else 0,
+        user_state=JobUserStateResponse(
+            saved=bool(state is not None and state.is_saved),
+            dismissed=bool(state is not None and state.is_dismissed),
+            saved_at=as_utc(state.saved_at) if state is not None else None,
+            dismissed_at=as_utc(state.dismissed_at) if state is not None else None,
+        ),
     )
 
 
@@ -303,11 +320,39 @@ def job_matches_response(
     )
 
 
+def answer_conflict_response(item: AnswerConflict) -> AnswerConflictResponse:
+    """Serialise a stored-answer conflict for the API."""
+    return AnswerConflictResponse(
+        question_key=item.question_key,
+        question_text=item.question_text,
+        category=item.category,
+        stored_answer=item.stored_answer,
+        conflicting_answer=item.conflicting_answer,
+        conflicting_source=item.conflicting_source,
+        reason=item.reason,
+        resolution_options=list(item.resolution_options),
+    )
+
+
+def stale_answer_response(item: StaleAnswer) -> StaleAnswerResponse:
+    """Serialise an outdated saved answer for the API."""
+    return StaleAnswerResponse(
+        question_key=item.question_key,
+        question_text=item.question_text,
+        last_confirmed_at=item.last_confirmed_at,
+        age_days=item.age_days,
+        max_age_days=item.max_age_days,
+        reason=item.reason,
+    )
+
+
 __all__ = [
+    "answer_conflict_response",
     "best_match_summary",
     "job_intelligence_response",
     "job_matches_response",
     "job_response",
     "match_response",
     "resume_comparison_response",
+    "stale_answer_response",
 ]

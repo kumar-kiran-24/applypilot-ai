@@ -122,6 +122,9 @@ class ApplicationFormAnalysisResponse(BaseModel):
     analyzed_at: datetime
     form_count: int
     field_count: int
+    application_step: str | None = None
+    step_supported: bool = False
+    application_platform: str | None = None
     visible_field_count: int
     requires_human_input_count: int
     automation_eligible_count: int

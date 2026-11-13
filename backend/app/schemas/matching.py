@@ -41,6 +41,19 @@ class BestMatchSummary(BaseModel):
     explanation: str = ""
 
 
+class JobUserStateResponse(BaseModel):
+    """The authenticated user's saved/dismissed decision for one posting.
+
+    Defaults describe a posting the user has not acted on, so a job without a
+    stored row serializes identically to a freshly discovered one.
+    """
+
+    saved: bool = False
+    dismissed: bool = False
+    saved_at: datetime | None = None
+    dismissed_at: datetime | None = None
+
+
 class JobResponse(BaseModel):
     """A persisted, user-owned job posting."""
 
@@ -57,6 +70,7 @@ class JobResponse(BaseModel):
     requirements: JobRequirementsResponse
     best_match: BestMatchSummary | None = None
     matches_count: int = 0
+    user_state: JobUserStateResponse = Field(default_factory=JobUserStateResponse)
 
 
 class JobListResponse(BaseModel):
@@ -225,6 +239,7 @@ __all__ = [
     "JobMatchesResponse",
     "JobRequirementsResponse",
     "JobResponse",
+    "JobUserStateResponse",
     "MatchEvidenceResponse",
     "MatchJobRequest",
     "MatchScoreBreakdown",

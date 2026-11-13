@@ -10,19 +10,26 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Path, status
+from fastapi import APIRouter, Depends, Path, Query, status
 
 from app.api.v1.endpoints.candidates import get_candidate_service
+from app.api.v1.serializers import answer_conflict_response, stale_answer_response
 from app.core.dependencies import get_authenticated_user
 from app.models.user import User
 from app.schemas.application_answer import (
     AnswerBankReviewResponse,
+    AnswerCategoryCount,
+    AnswerCategoryListResponse,
     AnswerConflictResolution,
-    AnswerConflictResponse,
     ApplicationAnswerDeleteResponse,
     ApplicationAnswerResponse,
     ApplicationAnswerUpdate,
-    StaleAnswerResponse,
+    CandidateKnowledgeResponse,
+    KnowledgeMissingItemResponse,
+    KnowledgeUnverifiedItemResponse,
+    SavedAnswerDetailResponse,
+    SavedAnswerEvidenceResponse,
+    SavedAnswerResponse,
 )
 from app.schemas.candidate import (
     CandidateDetailResponse,
@@ -35,6 +42,12 @@ from app.schemas.education import EducationCreate, EducationResponse, EducationU
 from app.schemas.experience import ExperienceCreate, ExperienceResponse, ExperienceUpdate
 from app.schemas.preference import JobPreferenceResponse, JobPreferenceUpdate
 from app.schemas.project import ProjectCreate, ProjectResponse, ProjectUpdate
+from app.services.answer_library import (
+    CATEGORY_PATTERN,
+    TRUST_PATTERN,
+    AnswerEvidence,
+    SavedAnswerView,
+)
 from app.services.candidate_service import CandidateService
 
 router = APIRouter(prefix="/profile", tags=["Profile"])
@@ -49,6 +62,33 @@ ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
     409: {"model": ErrorResponse},
     422: {"model": ErrorResponse},
 }
+
+
+def _saved_answer_payload(view: SavedAnswerView) -> SavedAnswerResponse:
+    base = ApplicationAnswerResponse.model_validate(view.answer)
+    return SavedAnswerResponse(
+        **base.model_dump(),
+        category=view.category,
+        category_label=view.category_label,
+        trust_level=view.trust.level,
+        trust_label=view.trust.label,
+        trust_reason=view.trust.reason,
+        needs_review=view.trust.needs_review,
+        needs_information=view.needs_information,
+        is_stale=view.is_stale,
+        freshness_reason=view.freshness_reason,
+    )
+
+
+def _evidence_payload(item: AnswerEvidence) -> SavedAnswerEvidenceResponse:
+    return SavedAnswerEvidenceResponse(
+        id=item.id,
+        kind=item.kind,
+        label=item.label,
+        detail=item.detail,
+        source=item.source,
+        verified=item.verified,
+    )
 
 
 @router.get(
@@ -280,19 +320,36 @@ async def update_preferences(
 # ---------------------------------------------------------------------------
 @router.get(
     "/answers",
-    response_model=list[ApplicationAnswerResponse],
-    summary="List reusable approved answers",
+    response_model=list[SavedAnswerResponse],
+    summary="List saved reusable answers",
     description=(
-        "Only answers owned by the authenticated user are returned. Legal "
+        "Only answers owned by the authenticated user are returned. Each answer "
+        "carries a derived category, trust level and freshness so an AI draft or "
+        "an unverified suggestion is never shown as a confirmed fact. Legal "
         "declarations are never stored here and always require fresh consent."
     ),
     responses=ERROR_RESPONSES,
 )
 async def list_answers(
-    current_user: CurrentUser, service: ServiceDep
-) -> list[ApplicationAnswerResponse]:
-    answers = await service.list_answers_for_user(current_user)
-    return [ApplicationAnswerResponse.model_validate(answer) for answer in answers]
+    current_user: CurrentUser,
+    service: ServiceDep,
+    q: Annotated[
+        str | None,
+        Query(max_length=200, description="Search question text, key or answer"),
+    ] = None,
+    category: Annotated[
+        str | None,
+        Query(pattern=CATEGORY_PATTERN, description="Supported answer category"),
+    ] = None,
+    trust: Annotated[
+        str | None,
+        Query(pattern=TRUST_PATTERN, description="Derived trust level"),
+    ] = None,
+) -> list[SavedAnswerResponse]:
+    views = await service.saved_answers_for_user(
+        current_user, query=q, category=category, trust=trust
+    )
+    return [_saved_answer_payload(view) for view in views]
 
 
 @router.get(
@@ -314,37 +371,123 @@ async def review_answers(
     return AnswerBankReviewResponse(
         total=review.total,
         verified=review.verified,
-        stale=[
-            StaleAnswerResponse(
-                question_key=item.question_key,
-                question_text=item.question_text,
-                last_confirmed_at=item.last_confirmed_at,
-                age_days=item.age_days,
-                max_age_days=item.max_age_days,
-                reason=item.reason,
-            )
-            for item in review.stale
-        ],
-        conflicts=[
-            AnswerConflictResponse(
-                question_key=item.question_key,
-                question_text=item.question_text,
-                category=item.category,
-                stored_answer=item.stored_answer,
-                conflicting_answer=item.conflicting_answer,
-                conflicting_source=item.conflicting_source,
-                reason=item.reason,
-                resolution_options=list(item.resolution_options),
-            )
-            for item in review.conflicts
-        ],
+        stale=[stale_answer_response(item) for item in review.stale],
+        conflicts=[answer_conflict_response(item) for item in review.conflicts],
         unverified=list(review.unverified),
+    )
+
+
+@router.get(
+    "/answers/categories",
+    response_model=AnswerCategoryListResponse,
+    summary="List saved-answer categories and counts",
+    description=(
+        "Returns only the categories the user's own saved answers actually use, "
+        "plus a count per trust level. Categories are derived deterministically "
+        "from each saved question; no new candidate data is created."
+    ),
+    responses=ERROR_RESPONSES,
+)
+async def list_answer_categories(
+    current_user: CurrentUser, service: ServiceDep
+) -> AnswerCategoryListResponse:
+    overview = await service.answer_categories_for_user(current_user)
+    return AnswerCategoryListResponse(
+        total=int(overview["total"]),
+        categories=[
+            AnswerCategoryCount(
+                category=item["category"],
+                label=item["label"],
+                count=item["count"],
+            )
+            for item in overview["categories"]
+        ],
+        trust_levels=dict(overview["trust_levels"]),
+    )
+
+
+@router.get(
+    "/answers/knowledge",
+    response_model=CandidateKnowledgeResponse,
+    summary="Review candidate knowledge consistency",
+    description=(
+        "Reports missing profile details, answers that need more information, "
+        "conflicts with verified data, outdated confirmations and unverified "
+        "answers. It never edits a verified fact or fabricates a missing value."
+    ),
+    responses=ERROR_RESPONSES,
+)
+async def review_candidate_knowledge(
+    current_user: CurrentUser, service: ServiceDep
+) -> CandidateKnowledgeResponse:
+    report = await service.knowledge_for_user(current_user)
+    return CandidateKnowledgeResponse(
+        total_answers=report.total_answers,
+        verified_answers=report.verified_answers,
+        needs_review=report.needs_review,
+        missing_information=[
+            KnowledgeMissingItemResponse(
+                field=item.field,
+                label=item.label,
+                section=item.section,
+                required=item.required,
+                kind=item.kind,
+                question_key=item.question_key,
+                reason=item.reason,
+            )
+            for item in report.missing_information
+        ],
+        conflicts=[answer_conflict_response(item) for item in report.conflicts],
+        outdated=[stale_answer_response(item) for item in report.outdated],
+        unverified=[
+            KnowledgeUnverifiedItemResponse(
+                question_key=item.question_key,
+                question_text=item.question_text,
+                trust_level=item.trust_level,
+                trust_label=item.trust_label,
+                reason=item.reason,
+            )
+            for item in report.unverified
+        ],
+        summary=report.summary,
+    )
+
+
+@router.get(
+    "/answers/{question_key}",
+    response_model=SavedAnswerDetailResponse,
+    summary="Get one saved answer with evidence",
+    description=(
+        "Returns the saved value, its derived category and trust level, the "
+        "recorded source, any verified profile value it relates to, and any "
+        "detected conflicts. Another user's answer is never returned."
+    ),
+    responses=ERROR_RESPONSES,
+)
+async def get_answer_detail(
+    question_key: Annotated[
+        str,
+        Path(
+            min_length=1,
+            max_length=100,
+            pattern=r"^[a-z0-9][a-z0-9_.-]*$",
+            description="Stable identifier of the application question",
+        ),
+    ],
+    current_user: CurrentUser,
+    service: ServiceDep,
+) -> SavedAnswerDetailResponse:
+    view, evidence = await service.answer_detail_for_user(current_user, question_key)
+    return SavedAnswerDetailResponse(
+        answer=_saved_answer_payload(view),
+        evidence=[_evidence_payload(item) for item in evidence],
+        conflicts=[answer_conflict_response(item) for item in view.conflicts],
     )
 
 
 @router.post(
     "/answers/{question_key}/resolve",
-    response_model=ApplicationAnswerResponse,
+    response_model=SavedAnswerResponse,
     summary="Resolve a stale or conflicting reusable answer",
     description=(
         "Re-confirm the stored value, adopt the current verified profile value, "
@@ -366,16 +509,17 @@ async def resolve_answer_conflict(
     payload: AnswerConflictResolution,
     current_user: CurrentUser,
     service: ServiceDep,
-) -> ApplicationAnswerResponse:
+) -> SavedAnswerResponse:
     answer = await service.resolve_answer_conflict_for_user(
         current_user, question_key, payload
     )
-    return ApplicationAnswerResponse.model_validate(answer)
+    view, _ = await service.answer_detail_for_user(current_user, answer.question_key)
+    return _saved_answer_payload(view)
 
 
 @router.put(
     "/answers/{question_key}",
-    response_model=ApplicationAnswerResponse,
+    response_model=SavedAnswerResponse,
     summary="Store or update a reusable answer",
     responses=ERROR_RESPONSES,
 )
@@ -392,9 +536,10 @@ async def upsert_answer(
     payload: ApplicationAnswerUpdate,
     current_user: CurrentUser,
     service: ServiceDep,
-) -> ApplicationAnswerResponse:
+) -> SavedAnswerResponse:
     answer = await service.upsert_answer_for_user(current_user, question_key, payload)
-    return ApplicationAnswerResponse.model_validate(answer)
+    view, _ = await service.answer_detail_for_user(current_user, answer.question_key)
+    return _saved_answer_payload(view)
 
 
 @router.delete(

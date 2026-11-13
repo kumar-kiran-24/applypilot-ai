@@ -29,7 +29,7 @@ from app.integrations.browser.launch_policy import preferred_address
 from app.integrations.browser.persistent import PersistentBrowserHandle
 from app.integrations.browser.session import BrowserUnavailableError
 from app.integrations.browser.view import browser_view_capability
-from app.models.application import Application, ApplicationStatus
+from app.models.application import Application, ApplicationStatus, RedirectStatus
 from app.models.browser_session import (
     BrowserSession,
 )
@@ -40,6 +40,7 @@ from app.models.browser_session import (
     BrowserSessionStatus as Status,
 )
 from app.services.application_adapters import adapter_for_url
+from app.services.application_platforms import detect_platform
 from app.services.application_service import ApplicationService
 from app.services.application_url_security import (
     HostResolver,
@@ -120,6 +121,16 @@ class BrowserSessionExpiredError(InvalidOperationError):
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _is_listing_url(url: str | None) -> bool:
+    """Offline classification; a malformed legacy URL is not a listing."""
+    if not url:
+        return False
+    try:
+        return detect_platform(url).is_job_board_link
+    except Exception:
+        return False
 
 
 class BrowserSessionService:
@@ -231,12 +242,16 @@ class BrowserSessionService:
             )
 
         adapter, detection = adapter_for_url(application.application_url)
-        if detection.is_job_board_link:
-            raise InvalidOperationError(
-                "This link points to a job board. Add the employer's own application "
-                "URL before starting a browser session.",
-                code="job_board_url_not_supported",
-            )
+        # A job listing is a supported starting page: ApplyPilot opens it and the
+        # user starts Easy Apply. The navigation policy only lets the resulting
+        # hand-off reach recognised application-platform domains, and the
+        # destination is validated separately before anything is stored.
+        listing_flow = detection.is_job_board_link
+        if listing_flow and application.redirect_status.value != "validated":
+            # A new run is a fresh attempt: an earlier refusal must not leave the
+            # workspace stuck on "unsupported" before the user tries again.
+            application.redirect_status = RedirectStatus.AWAITING_USER_ACTION
+            self.session.add(application)
 
         row = await self._row_for_application(application.id, user.id, for_update=True)
         if row is not None:
@@ -550,6 +565,30 @@ class BrowserSessionService:
             "job_title": application.job.job_title if application and application.job else "",
             "company": application.job.company if application and application.job else None,
             "application_url": application.application_url if application else "",
+            "listing_url": (
+                application.job_listing_url or application.application_url
+                if application
+                else None
+            ),
+            "application_destination_url": (
+                application.application_destination_url if application else None
+            ),
+            "destination_platform": (
+                application.destination_platform if application else None
+            ),
+            "destination_validated": bool(
+                application.destination_validated if application else False
+            ),
+            "redirect_status": (
+                application.redirect_status.value
+                if application
+                else RedirectStatus.NOT_STARTED.value
+            ),
+            "redirect_flow": bool(
+                application
+                and not application.destination_validated
+                and _is_listing_url(application.application_url)
+            ),
             "run_number": row.run_number,
             "state": row.state.value,
             "browser_status": row.browser_status.value,

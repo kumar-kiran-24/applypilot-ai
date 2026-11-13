@@ -43,6 +43,14 @@ class BrowserSessionResponse(BaseModel):
     job_title: str
     company: str | None
     application_url: str
+    #: The original discovered listing, preserved even after a redirect.
+    listing_url: str | None = None
+    #: The validated application form reached after the user started Easy Apply.
+    application_destination_url: str | None = None
+    destination_platform: str | None = None
+    destination_validated: bool = False
+    redirect_status: str = "not_started"
+    redirect_flow: bool = False
     run_number: int
     state: str
     browser_status: str
@@ -63,6 +71,26 @@ class BrowserSessionResponse(BaseModel):
     view: BrowserViewInfo
 
 
+class ApplicationRedirectResponse(BaseModel):
+    """Where an Easy Apply hand-off landed, with honest validation state."""
+
+    application_id: UUID
+    browser_session_id: UUID
+    status: str
+    message: str
+    listing_url: str | None = None
+    destination_url: str | None = None
+    application_platform: str | None = None
+    platform_name: str | None = None
+    application_step: str | None = None
+    step_supported: bool = False
+    destination_validated: bool = False
+    awaiting_user_action: bool = False
+    can_analyze: bool = False
+    authentication_required: bool = False
+    warnings: list[str] = Field(default_factory=list)
+
+
 class BrowserSessionListResponse(BaseModel):
     total: int
     sessions: list[BrowserSessionResponse]
@@ -80,6 +108,7 @@ class BrowserSessionCapabilitiesResponse(BaseModel):
 
 
 __all__ = [
+    "ApplicationRedirectResponse",
     "BrowserSessionCapabilitiesResponse",
     "BrowserSessionListResponse",
     "BrowserSessionResponse",

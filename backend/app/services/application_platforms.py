@@ -18,6 +18,7 @@ from enum import Enum
 from urllib.parse import urlsplit, urlunsplit
 
 from app.core.exceptions import InvalidOperationError
+from app.services.indeed_smartapply import is_smartapply_url
 
 MAX_APPLICATION_URL_LENGTH = 1000
 
@@ -30,6 +31,7 @@ class ApplicationPlatform(str, Enum):
     WORKDAY = "workday"
     ASHBY = "ashby"
     SMARTRECRUITERS = "smartrecruiters"
+    INDEED_SMARTAPPLY = "indeed_smartapply"
     ICIMS = "icims"
     COMPANY_HOSTED = "company_hosted"
 
@@ -122,6 +124,21 @@ PLATFORM_SPECS: tuple[PlatformSpec, ...] = (
         ),
     ),
     PlatformSpec(
+        platform=ApplicationPlatform.INDEED_SMARTAPPLY,
+        display_name="Indeed SmartApply",
+        # Exact host only: a URL that merely contains "indeed" is not trusted.
+        host_patterns=(r"^smartapply\.indeed\.com$",),
+        path_pattern=None,
+        supports_automation=True,
+        requires_account=None,
+        documentation_url="https://smartapply.indeed.com/",
+        notes=(
+            "Indeed SmartApply is often reached from a Glassdoor Easy Apply "
+            "button. ApplyPilot detects the redirect, validates this exact host "
+            "and analyses the visible form without submitting it.",
+        ),
+    ),
+    PlatformSpec(
         platform=ApplicationPlatform.ICIMS,
         display_name="iCIMS",
         host_patterns=(r"(^|\.)icims\.com$",),
@@ -159,6 +176,14 @@ _JOB_BOARD_HOSTS = (
     r"(^|\.)linkedin\.com$",
 )
 
+#: Source board for a listing link. Used for messaging only; the listing URL is
+#: never scraped and is always preserved as ``job_listing_url``.
+_LISTING_SOURCES: tuple[tuple[str, str], ...] = (
+    ("glassdoor", r"(^|\.)glassdoor\.[a-z.]+$"),
+    ("indeed", r"(^|\.)indeed\.[a-z.]+$"),
+    ("linkedin", r"(^|\.)linkedin\.com$"),
+)
+
 _BLOCKED_HOST_SUFFIXES = (".local", ".internal", ".localhost", ".lan", ".home.arpa")
 _BLOCKED_HOSTS = {"localhost", "metadata.google.internal"}
 
@@ -177,10 +202,19 @@ class PlatformDetection:
     reason: str
     notes: tuple[str, ...]
     is_job_board_link: bool = False
+    #: Which job board a listing link came from ("glassdoor", "indeed", ...).
+    listing_source: str | None = None
+    #: True only for a recognised application form on a supported platform.
+    is_application_page: bool = False
 
     @property
     def is_automation_capable(self) -> bool:
         return self.supports_automation and not self.is_job_board_link
+
+    @property
+    def supports_easy_apply_redirect(self) -> bool:
+        """A listing ApplyPilot can open while the user starts Easy Apply."""
+        return bool(self.is_job_board_link)
 
 
 def _hostname_is_safe(hostname: str) -> bool:
@@ -233,6 +267,20 @@ def normalize_application_url(raw: str) -> str:
 
 def _matches_any(patterns: tuple[str, ...], value: str) -> bool:
     return any(re.search(pattern, value, re.IGNORECASE) for pattern in patterns)
+
+
+def listing_source_for_url(raw_url: str) -> str | None:
+    """Name the job board a listing link belongs to, or ``None``."""
+    try:
+        host = (urlsplit(normalize_application_url(raw_url)).hostname or "").lower()
+    except ApplicationUrlError:
+        return None
+    if not host:
+        return None
+    for source, pattern in _LISTING_SOURCES:
+        if re.search(pattern, host, re.IGNORECASE):
+            return source
+    return None
 
 
 def is_job_board_url(raw_url: str) -> bool:
@@ -324,27 +372,6 @@ def detect_platform(raw_url: str) -> PlatformDetection:
     parts = urlsplit(url)
     host = (parts.hostname or "").lower()
 
-    if _matches_any(_JOB_BOARD_HOSTS, host):
-        spec = _SPECS_BY_PLATFORM[ApplicationPlatform.COMPANY_HOSTED]
-        return PlatformDetection(
-            platform=spec.platform,
-            display_name=spec.display_name,
-            confidence=DetectionConfidence.NONE,
-            supports_automation=False,
-            requires_account=None,
-            application_url=url,
-            host=host,
-            reason=(
-                "This link points to a job board, not the employer's application "
-                "form. Paste the employer's own application URL to prepare it."
-            ),
-            notes=(
-                "ApplyPilot does not scrape job boards or bypass their anti-bot "
-                "protections.",
-            ),
-            is_job_board_link=True,
-        )
-
     # Greenhouse embeds on company domains are identified by the gh_jid query.
     query = parts.query.lower()
     if "gh_jid=" in query or "gh_src=" in query:
@@ -359,6 +386,7 @@ def detect_platform(raw_url: str) -> PlatformDetection:
             host=host,
             reason="The URL carries a Greenhouse job id, so it uses an embedded Greenhouse form.",
             notes=spec.notes,
+            is_application_page=True,
         )
 
     for spec in PLATFORM_SPECS:
@@ -367,6 +395,12 @@ def detect_platform(raw_url: str) -> PlatformDetection:
         if not _matches_any(spec.host_patterns, host):
             continue
         if spec.path_pattern and not re.search(spec.path_pattern, parts.path, re.IGNORECASE):
+            continue
+        if spec.platform is ApplicationPlatform.INDEED_SMARTAPPLY and not is_smartapply_url(
+            url
+        ):
+            # A look-alike host (extra labels, a non-https scheme or a custom
+            # port) must never be treated as the approved SmartApply origin.
             continue
         return PlatformDetection(
             platform=spec.platform,
@@ -378,6 +412,32 @@ def detect_platform(raw_url: str) -> PlatformDetection:
             host=host,
             reason=f"Recognised a {spec.display_name} application URL.",
             notes=spec.notes,
+            is_application_page=True,
+        )
+
+    if _matches_any(_JOB_BOARD_HOSTS, host):
+        spec = _SPECS_BY_PLATFORM[ApplicationPlatform.COMPANY_HOSTED]
+        source = listing_source_for_url(url)
+        return PlatformDetection(
+            platform=spec.platform,
+            display_name=spec.display_name,
+            confidence=DetectionConfidence.NONE,
+            supports_automation=False,
+            requires_account=None,
+            application_url=url,
+            host=host,
+            reason=(
+                "This link is a job board listing, not the employer's application "
+                "form. ApplyPilot can open it for an Easy Apply hand-off; the "
+                "employer's form is detected and validated after you start the "
+                "application."
+            ),
+            notes=(
+                "ApplyPilot does not scrape job boards or bypass their anti-bot "
+                "protections.",
+            ),
+            is_job_board_link=True,
+            listing_source=source,
         )
 
     spec = _SPECS_BY_PLATFORM[ApplicationPlatform.COMPANY_HOSTED]
@@ -421,6 +481,7 @@ __all__ = [
     "PlatformSpec",
     "detect_platform",
     "is_job_board_url",
+    "listing_source_for_url",
     "normalize_application_url",
     "platform_catalog",
     "suggest_employer_application_url",

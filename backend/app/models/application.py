@@ -26,6 +26,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    false,
 )
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -94,6 +95,21 @@ class InspectionMode(str, Enum):
     AUTOMATED = "automated"
     DECLARED = "declared"
     MANUAL = "manual"
+
+
+class RedirectStatus(str, Enum):
+    """Progress of an Easy Apply hand-off from a listing to a form.
+
+    ``application_url`` keeps pointing at the page the browser opens (the
+    listing for Easy Apply); the detected form is stored separately in
+    ``application_destination_url`` and never replaces the original listing.
+    """
+
+    NOT_STARTED = "not_started"
+    AWAITING_USER_ACTION = "awaiting_user_action"
+    VALIDATED = "validated"
+    UNSUPPORTED = "unsupported"
+    REJECTED = "rejected"
 
 
 class AnswerSource(str, Enum):
@@ -185,6 +201,22 @@ class Application(Base, TimestampMixin):
     job_listing_url: Mapped[str | None] = mapped_column(String(1000))
     # Optional employer careers page, never opened automatically.
     employer_careers_url: Mapped[str | None] = mapped_column(String(1000))
+    # The validated application form reached after Easy Apply. It never replaces
+    # ``job_listing_url`` or ``application_url`` (the page the browser opens).
+    application_destination_url: Mapped[str | None] = mapped_column(String(1000))
+    destination_platform: Mapped[str | None] = mapped_column(String(32))
+    redirect_status: Mapped[RedirectStatus] = mapped_column(
+        _enum_column(RedirectStatus, "redirect_status"),
+        nullable=False,
+        default=RedirectStatus.NOT_STARTED,
+        server_default="not_started",
+    )
+    destination_validated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    redirect_detected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     automation_mode: Mapped[AutomationMode] = mapped_column(
         _enum_column(AutomationMode, "automation_mode"),
         nullable=False,
@@ -320,4 +352,5 @@ __all__ = [
     "InspectionMode",
     "QuestionStatus",
     "QuestionType",
+    "RedirectStatus",
 ]

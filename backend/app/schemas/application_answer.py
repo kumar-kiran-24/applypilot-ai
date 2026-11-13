@@ -142,6 +142,143 @@ class AnswerConflictResolution(ORMModel):
         return self
 
 
+class SavedAnswerResponse(ApplicationAnswerResponse):
+    """A reusable answer with its derived category and trust level.
+
+    ``category`` and ``trust_level`` are projections of existing stored data
+    (question wording, ``verification_status`` and ``answer_source``); they are
+    never persisted as new candidate facts.
+    """
+
+    category: str
+    category_label: str
+    trust_level: str
+    trust_label: str
+    trust_reason: str
+    needs_review: bool = True
+    needs_information: bool = False
+    is_stale: bool = False
+    freshness_reason: str | None = None
+
+
+class AnswerCategoryCount(ORMModel):
+    """One supported answer category and how many saved answers use it."""
+
+    category: str
+    label: str
+    count: int
+
+
+class AnswerCategoryListResponse(ORMModel):
+    """Categories present in the user's answer bank."""
+
+    total: int
+    categories: list[AnswerCategoryCount] = Field(default_factory=list)
+    trust_levels: dict[str, int] = Field(default_factory=dict)
+
+
+class SavedAnswerEvidenceResponse(ORMModel):
+    """One provenance item shown for a saved answer."""
+
+    id: str
+    kind: str
+    label: str
+    detail: str
+    source: str
+    verified: bool
+
+
+class SavedAnswerDetailResponse(ORMModel):
+    """A saved answer with its evidence and detected conflicts."""
+
+    answer: SavedAnswerResponse
+    evidence: list[SavedAnswerEvidenceResponse] = Field(default_factory=list)
+    conflicts: list[AnswerConflictResponse] = Field(default_factory=list)
+
+
+class KnowledgeMissingItemResponse(ORMModel):
+    """A missing profile detail or an answer that needs more information."""
+
+    field: str
+    label: str
+    section: str
+    required: bool
+    kind: str
+    question_key: str | None = None
+    reason: str = ""
+
+
+class KnowledgeUnverifiedItemResponse(ORMModel):
+    """A saved answer that is not yet a verified fact."""
+
+    question_key: str
+    question_text: str
+    trust_level: str
+    trust_label: str
+    reason: str
+
+
+class CandidateKnowledgeResponse(ORMModel):
+    """Read-only consistency report for the candidate's knowledge."""
+
+    total_answers: int
+    verified_answers: int
+    needs_review: int
+    missing_information: list[KnowledgeMissingItemResponse] = Field(
+        default_factory=list
+    )
+    conflicts: list[AnswerConflictResponse] = Field(default_factory=list)
+    outdated: list[StaleAnswerResponse] = Field(default_factory=list)
+    unverified: list[KnowledgeUnverifiedItemResponse] = Field(default_factory=list)
+    summary: str = ""
+    disclaimer: str = (
+        "This report never changes verified information and never fills a "
+        "missing detail with an assumption."
+    )
+
+
+class ReusableAnswerSuggestionResponse(ORMModel):
+    """One saved answer offered for a new application question."""
+
+    question_key: str
+    question_text: str
+    answer: str
+    answer_source: AnswerSource
+    verification_status: VerificationStatus
+    category: str
+    category_label: str
+    trust_level: str
+    trust_label: str
+    trust_reason: str
+    relevance: float
+    reason: str
+    last_confirmed_at: datetime | None = None
+    updated_at: datetime
+    requires_review: bool
+    safe_to_insert: bool
+    is_stale: bool = False
+    freshness_reason: str | None = None
+    conflicts: list[AnswerConflictResponse] = Field(default_factory=list)
+
+
+class ReusableAnswerSuggestionsResponse(ORMModel):
+    """Ranked reuse suggestions for one application question."""
+
+    application_id: UUID
+    job_id: UUID
+    job_title: str
+    company: str | None = None
+    question_key: str
+    question_text: str
+    suggestions: list[ReusableAnswerSuggestionResponse] = Field(
+        default_factory=list
+    )
+    message: str = (
+        "Suggestions only. Nothing is inserted into the application or the "
+        "employer's form until you choose it and review the value."
+    )
+
+
 def utc_now() -> datetime:
     """Timezone-aware UTC timestamp helper."""
     return datetime.now(timezone.utc)

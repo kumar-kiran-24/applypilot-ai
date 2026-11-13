@@ -34,6 +34,7 @@ from app.services.application_platforms import (
     ApplicationUrlError,
     normalize_application_url,
 )
+from app.services.indeed_smartapply import AUTHENTICATION_HOSTS
 
 if TYPE_CHECKING:
     from app.services.application_platforms import PlatformDetection
@@ -45,9 +46,33 @@ PLATFORM_NAVIGATION_DOMAINS: dict[ApplicationPlatform, tuple[str, ...]] = {
     ApplicationPlatform.LEVER: ("lever.co",),
     ApplicationPlatform.ASHBY: ("ashbyhq.com",),
     ApplicationPlatform.SMARTRECRUITERS: ("smartrecruiters.com",),
+    ApplicationPlatform.INDEED_SMARTAPPLY: ("smartapply.indeed.com",),
     ApplicationPlatform.WORKDAY: ("myworkdayjobs.com", "workday.com"),
     ApplicationPlatform.ICIMS: ("icims.com",),
 }
+
+#: Application destinations a job-listing session may reach after the user
+#: starts Easy Apply. Only domains owned by recognised application platforms
+#: are listed: an unknown employer host is still refused, so a redirect cannot
+#: escape to an arbitrary site. Company-hosted links stay out deliberately.
+TRUSTED_APPLICATION_DOMAINS: tuple[str, ...] = tuple(
+    dict.fromkeys(
+        domain
+        for platform, domains in PLATFORM_NAVIGATION_DOMAINS.items()
+        if platform not in {ApplicationPlatform.WORKDAY, ApplicationPlatform.ICIMS}
+        for domain in domains
+    )
+)
+
+#: Exact Indeed auth hosts. They may be reached so the user can sign in, but the
+#: redirect service classifies them as an authentication step, never as the
+#: validated application form. No credentials are read or typed.
+SMARTAPPLY_AUTH_DOMAINS: tuple[str, ...] = tuple(sorted(AUTHENTICATION_HOSTS))
+
+#: A listing hand-off may reach recognised forms and Indeed's own auth hosts.
+LISTING_REDIRECT_DOMAINS: tuple[str, ...] = tuple(
+    dict.fromkeys((*TRUSTED_APPLICATION_DOMAINS, *SMARTAPPLY_AUTH_DOMAINS))
+)
 
 DEFAULT_HTTPS_PORT = 443
 DEFAULT_HTTP_PORT = 80
@@ -97,6 +122,10 @@ class NavigationPolicy:
     start_origin: ApprovedOrigin
     allowed_domains: tuple[str, ...] = ()
     extra_origins: tuple[ApprovedOrigin, ...] = field(default_factory=tuple)
+    #: A listing hand-off may legitimately leave the listing host. Blocked
+    #: destinations are then reported as an unsupported application platform
+    #: instead of being treated as a compromised browser session.
+    redirect_flow: bool = False
 
     @property
     def allowed_origins(self) -> tuple[str, ...]:
@@ -182,15 +211,38 @@ def build_navigation_policy(
     *,
     platform: ApplicationPlatform | None = None,
     extra_origins: tuple[str, ...] = (),
+    redirect_flow: bool = False,
 ) -> NavigationPolicy:
     """Pin one session to the employer origin and its platform's domains."""
     start = _origin(application_url)
     domains = PLATFORM_NAVIGATION_DOMAINS.get(platform, ()) if platform else ()
+    if platform is ApplicationPlatform.INDEED_SMARTAPPLY:
+        domains = (*domains, *SMARTAPPLY_AUTH_DOMAINS)
     extras = tuple(_origin(value) for value in extra_origins)
     return NavigationPolicy(
         start_origin=start,
         allowed_domains=domains,
         extra_origins=extras,
+        redirect_flow=redirect_flow,
+    )
+
+
+def build_listing_redirect_policy(
+    listing_url: str, *, extra_origins: tuple[str, ...] = ()
+) -> NavigationPolicy:
+    """Policy for a job listing whose Easy Apply button opens a form elsewhere.
+
+    The listing host stays allowed, and only recognised application-platform
+    domains are added. Every other destination is refused by the navigation
+    guard, so the agent never silently follows an unrelated redirect.
+    """
+    start = _origin(listing_url)
+    extras = tuple(_origin(value) for value in extra_origins)
+    return NavigationPolicy(
+        start_origin=start,
+        allowed_domains=LISTING_REDIRECT_DOMAINS,
+        extra_origins=extras,
+        redirect_flow=True,
     )
 
 
@@ -198,6 +250,10 @@ def policy_for_detection(
     detection: PlatformDetection, *, extra_origins: tuple[str, ...] = ()
 ) -> NavigationPolicy:
     """Build the policy for a detected application link."""
+    if detection.is_job_board_link:
+        return build_listing_redirect_policy(
+            detection.application_url, extra_origins=extra_origins
+        )
     return build_navigation_policy(
         detection.application_url,
         platform=detection.platform,
@@ -319,11 +375,15 @@ async def ensure_public_destination(
 
 
 __all__ = [
+    "LISTING_REDIRECT_DOMAINS",
     "PLATFORM_NAVIGATION_DOMAINS",
+    "SMARTAPPLY_AUTH_DOMAINS",
+    "TRUSTED_APPLICATION_DOMAINS",
     "ApprovedOrigin",
     "HostResolver",
     "NavigationPolicy",
     "UnsafeNavigationError",
+    "build_listing_redirect_policy",
     "build_navigation_policy",
     "ensure_public_destination",
     "policy_for_detection",

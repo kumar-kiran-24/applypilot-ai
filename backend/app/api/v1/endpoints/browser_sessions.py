@@ -28,6 +28,7 @@ from app.schemas.application_form import (
     ApplicationFormFieldsResponse,
 )
 from app.schemas.browser_session import (
+    ApplicationRedirectResponse,
     BrowserSessionCapabilitiesResponse,
     BrowserSessionListResponse,
     BrowserSessionResponse,
@@ -37,6 +38,7 @@ from app.schemas.browser_session import (
 )
 from app.schemas.common import ErrorResponse
 from app.services.application_form_service import ApplicationFormService
+from app.services.application_redirect_service import ApplicationRedirectService
 from app.services.browser_session_service import BrowserSessionService
 
 router = APIRouter(prefix="/browser-sessions", tags=["Browser automation"])
@@ -200,6 +202,28 @@ async def reanalyze_application_form(
 ) -> ApplicationFormAnalysisResponse:
     service = ApplicationFormService(db)
     return await service.analyze(current_user, application_id)
+
+
+@router.post(
+    "/by-application/{application_id}/detect-destination",
+    response_model=ApplicationRedirectResponse,
+    summary="Detect where Easy Apply landed",
+    description=(
+        "Watches the owned live browser after the user starts Easy Apply on a job "
+        "listing, then validates the destination. Only recognised application "
+        "platforms on public addresses are stored; the original listing URL is "
+        "never overwritten. Unsupported, private or look-alike destinations are "
+        "reported precisely instead of as a generic browser failure. The button "
+        "is never clicked on the user's behalf."
+    ),
+    responses=ERROR_RESPONSES,
+)
+async def detect_application_destination(
+    application_id: ApplicationId, current_user: CurrentUser, db: Database
+) -> ApplicationRedirectResponse:
+    service = ApplicationRedirectService(db)
+    outcome = await service.check(current_user, application_id)
+    return ApplicationRedirectResponse.model_validate(outcome.to_payload())
 
 
 @router.post(

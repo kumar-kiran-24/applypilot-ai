@@ -113,8 +113,16 @@ class ApplicationPreviewResponse(BaseModel):
     job_listing_url: str | None = None
     # An optional employer careers page; never opened automatically.
     employer_careers_url: str | None = None
-    # True when application_url still points at a job board instead of a form.
+    # True when application_url is the page ApplyPilot opens, a listing whose
+    # Easy Apply button starts the application on another platform.
     application_url_is_job_board: bool = False
+    # The validated form reached after the user starts Easy Apply. It never
+    # replaces application_url or job_listing_url.
+    application_destination_url: str | None = None
+    destination_platform: str | None = None
+    destination_validated: bool = False
+    redirect_status: str = "not_started"
+    redirect_flow: bool = False
     # A conservative suggestion from trusted listing text. It is advisory and
     # must be validated through /inspect before use.
     suggested_application_url: str | None = None
@@ -170,6 +178,27 @@ class ApplicationListResponse(BaseModel):
     applications: list[ApplicationSummaryResponse] = Field(default_factory=list)
 
 
+class ApplicationPipelineResponse(BaseModel):
+    """Dashboard view of the application pipeline.
+
+    Counts are aggregated from the stored `status` and `stage` columns by the
+    backend, so the dashboard never keeps its own copy of the lifecycle. `stage`
+    is null until the user records a post-submission outcome, which is why the
+    stage totals can add up to less than `submitted`.
+    """
+
+    total: int = 0
+    # Pre-submission work plus submissions the user must still act on.
+    in_progress: int = 0
+    # Accepted by the user and handed to the platform (never auto-submitted).
+    submitted: int = 0
+    failed: int = 0
+    cancelled: int = 0
+    # Keyed by the exact `ApplicationStage` value; every value is always present.
+    by_stage: dict[str, int] = Field(default_factory=dict)
+    recent: list[ApplicationSummaryResponse] = Field(default_factory=list)
+
+
 class AnalyzeApplicationRequest(BaseModel):
     """Prepare an application for one stored job."""
 
@@ -197,11 +226,22 @@ class InspectApplicationRequest(BaseModel):
 
 
 class UpdateQuestionRequest(BaseModel):
-    """Save or confirm one answer."""
+    """Save or confirm one answer.
+
+    ``reused_answer_key`` records that the value came from one of the user's
+    saved answers. It is optional and always re-checked against the owning
+    candidate, so it can only add provenance, never borrow another user's data.
+    """
 
     answer: str | None = Field(default=None, max_length=5000)
     confirmed: bool = False
     note: str | None = Field(default=None, max_length=2000)
+    reused_answer_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        pattern=r"^[a-z0-9][a-z0-9_.-]*$",
+    )
 
 
 class SelectResumeRequest(BaseModel):

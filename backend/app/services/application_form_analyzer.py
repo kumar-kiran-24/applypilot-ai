@@ -42,6 +42,7 @@ from app.services.application_form_extraction import (
     RawFormField,
     extract_form_snapshot,
 )
+from app.services.indeed_smartapply import SmartApplyPage, inspect_page
 
 #: Below this classification confidence a field is never considered automated.
 AUTOMATION_CONFIDENCE_THRESHOLD = 0.75
@@ -124,6 +125,16 @@ class FormAnalysisResult:
     fields: tuple[DetectedFormField, ...]
     form_count: int
     warnings: tuple[str, ...] = ()
+    #: Present only for a strictly validated Indeed SmartApply page.
+    smartapply: SmartApplyPage | None = None
+
+    @property
+    def application_step(self) -> str | None:
+        return self.smartapply.step.value if self.smartapply else None
+
+    @property
+    def step_supported(self) -> bool:
+        return bool(self.smartapply and self.smartapply.supported)
 
     @property
     def captcha_detected(self) -> bool:
@@ -307,6 +318,7 @@ class ApplicationFormAnalyzer:
         self,
         page: FormPageContent,
         *,
+        page_url: str | None = None,
         candidate: Candidate | None = None,
         resume: Resume | None = None,
         reusable_answers: list[ApplicationAnswer] | None = None,
@@ -320,6 +332,7 @@ class ApplicationFormAnalyzer:
             )
         return self.analyze(
             html,
+            page_url=page_url,
             candidate=candidate,
             resume=resume,
             reusable_answers=reusable_answers,
@@ -330,6 +343,7 @@ class ApplicationFormAnalyzer:
         self,
         html: str,
         *,
+        page_url: str | None = None,
         candidate: Candidate | None = None,
         resume: Resume | None = None,
         reusable_answers: list[ApplicationAnswer] | None = None,
@@ -474,10 +488,27 @@ class ApplicationFormAnalyzer:
                 f"{unknowns} field{'s' if unknowns != 1 else ''} could not be "
                 "classified confidently and require human review."
             )
+
+        # Indeed SmartApply recognition is URL-gated and strict. A recognised
+        # resume-selection step is not reported as "page unavailable" even when
+        # it exposes fewer controls than a conventional form.
+        smartapply = inspect_page(page_url, html) if page_url else None
+        if smartapply is not None:
+            if not detected and smartapply.supported:
+                warnings.append(
+                    f"{smartapply.step_label} step detected. Its visible controls "
+                    "may load in stages; use the live browser and re-analyse after "
+                    "the page settles. Only standard HTML controls can be read; if "
+                    "the resume cards are custom widgets, choose the approved resume "
+                    "yourself."
+                )
+            warnings.extend(smartapply.notes)
+
         return FormAnalysisResult(
             fields=tuple(detected),
             form_count=snapshot.form_count,
             warnings=tuple(warnings),
+            smartapply=smartapply,
         )
 
 

@@ -46,7 +46,12 @@ from app.schemas.resume_comparison import (
     ResumeComparisonResponse,
 )
 from app.services.job_discovery import fetch_glassdoor_jobs, store_glassdoor_jobs
-from app.services.job_service import JobService
+from app.services.job_service import (
+    MAX_SEARCH_LENGTH,
+    JobService,
+    JobSort,
+    JobStateFilter,
+)
 from app.services.job_understanding_service import (
     JobIntelligenceResult,
     JobUnderstandingService,
@@ -158,8 +163,11 @@ async def discover_jobs(
     response_model=JobListResponse,
     summary="List stored jobs",
     description=(
-        "Returns the user's stored postings newest first, each with the "
-        "recommended resume when matches have already been computed."
+        "Returns the user's stored postings newest first by default, each with "
+        "the recommended resume when matches have already been computed. "
+        "Supports free-text search over the stored posting text, filters on "
+        "columns that exist on the posting, sorting and pagination. Dismissed "
+        "postings are excluded unless `state` asks for them."
     ),
     responses=ERROR_RESPONSES,
 )
@@ -168,16 +176,104 @@ async def list_jobs(
     db: Database,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0, le=10_000)] = 0,
+    q: Annotated[
+        str | None,
+        Query(
+            max_length=MAX_SEARCH_LENGTH,
+            description="Search job title, company, location and description",
+        ),
+    ] = None,
+    company: Annotated[
+        str | None, Query(max_length=200, description="Company name contains")
+    ] = None,
+    location: Annotated[
+        str | None, Query(max_length=200, description="Location contains")
+    ] = None,
+    source: Annotated[
+        str | None, Query(max_length=32, description="Where the posting came from")
+    ] = None,
+    has_matches: Annotated[
+        bool | None, Query(description="Only postings with/without resume matches")
+    ] = None,
+    state: Annotated[
+        JobStateFilter,
+        Query(description="Saved/dismissed filter; `active` is the default view"),
+    ] = "active",
+    sort: Annotated[JobSort, Query(description="Ordering of the returned page")] = (
+        "received_desc"
+    ),
 ) -> JobListResponse:
     service = JobService(db)
-    jobs = await service.list_jobs(current_user, limit=limit, offset=offset)
-    total = await service.count_jobs(current_user)
+    jobs = await service.list_jobs(
+        current_user,
+        q=q,
+        company=company,
+        location=location,
+        source=source,
+        has_matches=has_matches,
+        state=state,
+        sort=sort,
+        limit=limit,
+        offset=offset,
+    )
+    total = await service.count_jobs(
+        current_user,
+        q=q,
+        company=company,
+        location=location,
+        source=source,
+        has_matches=has_matches,
+        state=state,
+    )
+    states = await service.states_for(current_user, [job.id for job in jobs])
     best = await MatchingService(db).best_matches_for_jobs(
         current_user, [job.id for job in jobs]
     )
     return JobListResponse(
         total=total,
-        jobs=[job_response(job, best=best.get(job.id)) for job in jobs],
+        jobs=[
+            job_response(job, best=best.get(job.id), state=states.get(job.id))
+            for job in jobs
+        ],
+    )
+
+
+@router.get(
+    "/saved",
+    response_model=JobListResponse,
+    summary="List saved job recommendations",
+    description=(
+        "Returns the postings the user explicitly saved, most recently saved "
+        "first. Saved postings are per user and never alter the stored posting "
+        "or its deduplication identity."
+    ),
+    responses=ERROR_RESPONSES,
+)
+async def list_saved_jobs(
+    current_user: CurrentUser,
+    db: Database,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0, le=10_000)] = 0,
+) -> JobListResponse:
+    service = JobService(db)
+    jobs = await service.list_jobs(
+        current_user,
+        state="saved",
+        sort="saved_desc",
+        limit=limit,
+        offset=offset,
+    )
+    total = await service.count_jobs(current_user, state="saved")
+    states = await service.states_for(current_user, [job.id for job in jobs])
+    best = await MatchingService(db).best_matches_for_jobs(
+        current_user, [job.id for job in jobs]
+    )
+    return JobListResponse(
+        total=total,
+        jobs=[
+            job_response(job, best=best.get(job.id), state=states.get(job.id))
+            for job in jobs
+        ],
     )
 
 
@@ -188,9 +284,89 @@ async def list_jobs(
     responses=ERROR_RESPONSES,
 )
 async def get_job(job_id: JobId, current_user: CurrentUser, db: Database) -> JobResponse:
-    job = await JobService(db).get_job(current_user, job_id)
+    service = JobService(db)
+    job = await service.get_job(current_user, job_id)
     best = await MatchingService(db).best_matches_for_jobs(current_user, [job.id])
-    return job_response(job, best=best.get(job.id))
+    return job_response(
+        job, best=best.get(job.id), state=await service.state_for(current_user, job)
+    )
+
+
+async def _state_response(
+    db: AsyncSession,
+    current_user: User,
+    job_id: UUID,
+    *,
+    saved: bool | None = None,
+    dismissed: bool | None = None,
+) -> JobResponse:
+    """Apply one state change and return the posting with its new state."""
+    service = JobService(db)
+    if saved is not None:
+        job, state = await service.set_saved(current_user, job_id, saved=saved)
+    else:
+        job, state = await service.set_dismissed(
+            current_user, job_id, dismissed=bool(dismissed)
+        )
+    best = await MatchingService(db).best_matches_for_jobs(current_user, [job.id])
+    return job_response(job, best=best.get(job.id), state=state)
+
+
+@router.post(
+    "/{job_id}/save",
+    response_model=JobResponse,
+    summary="Save a job recommendation",
+    description=(
+        "Records that the user wants to keep this posting. Saving clears a "
+        "previous dismissal. Repeating the call is idempotent and never creates "
+        "a second state row."
+    ),
+    responses=ERROR_RESPONSES,
+)
+async def save_job(job_id: JobId, current_user: CurrentUser, db: Database) -> JobResponse:
+    return await _state_response(db, current_user, job_id, saved=True)
+
+
+@router.delete(
+    "/{job_id}/save",
+    response_model=JobResponse,
+    summary="Remove a saved job recommendation",
+    description="Clears the saved flag for an owned posting; the posting remains.",
+    responses=ERROR_RESPONSES,
+)
+async def unsave_job(
+    job_id: JobId, current_user: CurrentUser, db: Database
+) -> JobResponse:
+    return await _state_response(db, current_user, job_id, saved=False)
+
+
+@router.post(
+    "/{job_id}/dismiss",
+    response_model=JobResponse,
+    summary="Dismiss a job recommendation",
+    description=(
+        "Hides the posting from the default list and clears any saved flag. "
+        "Nothing is deleted, so the dismissal can be undone."
+    ),
+    responses=ERROR_RESPONSES,
+)
+async def dismiss_job(
+    job_id: JobId, current_user: CurrentUser, db: Database
+) -> JobResponse:
+    return await _state_response(db, current_user, job_id, dismissed=True)
+
+
+@router.post(
+    "/{job_id}/restore",
+    response_model=JobResponse,
+    summary="Restore a dismissed job recommendation",
+    description="Returns a dismissed posting to the default list without saving it.",
+    responses=ERROR_RESPONSES,
+)
+async def restore_job(
+    job_id: JobId, current_user: CurrentUser, db: Database
+) -> JobResponse:
+    return await _state_response(db, current_user, job_id, dismissed=False)
 
 
 @router.post(

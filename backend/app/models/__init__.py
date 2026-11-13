@@ -45,6 +45,7 @@ from app.models.gmail_connection import GmailConnection
 from app.models.job import Job
 from app.models.job_intelligence import JobIntelligence
 from app.models.job_match import JobResumeMatch
+from app.models.job_state import JobState
 from app.models.missing_information import (
     MissingInformationItemStatus,
     MissingInformationQueue,
@@ -88,6 +89,7 @@ __all__ = [
     "JobIntelligence",
     "JobPreference",
     "JobResumeMatch",
+    "JobState",
     "MissingInformationItemStatus",
     "MissingInformationQueue",
     "MissingInformationStatus",

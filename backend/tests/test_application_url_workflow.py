@@ -291,18 +291,18 @@ async def test_url_update_requires_authentication(
     assert response.status_code == 401
 
 
-async def test_browser_session_rejects_listing_url_with_useful_error(
+async def test_listing_application_reports_the_easy_apply_redirect_flow(
     client: AsyncClient, session_factory: SessionFactory
 ) -> None:
-    user, _, preview = await prepare_application(client, session_factory)
-    response = await client.post(
-        "/api/v1/browser-sessions",
-        json={"application_id": preview["application_id"]},
-        headers=bearer(user),
-    )
-    assert response.status_code == 400
-    assert response.json()["code"] == "job_board_url_not_supported"
-    assert "employer" in response.json()["detail"].lower()
+    """The listing is preserved and the form destination starts unvalidated."""
+    _, _, preview = await prepare_application(client, session_factory)
+    assert preview["application_url"] == GLASSDOOR
+    assert preview["job_listing_url"] == GLASSDOOR
+    assert preview["redirect_flow"] is True
+    assert preview["redirect_status"] == "not_started"
+    assert preview["destination_validated"] is False
+    assert preview["application_destination_url"] is None
+    assert any("Easy Apply" in note for note in preview["notes"])
 
 
 async def test_suggestion_from_trusted_listing_text_requires_explicit_update(

@@ -39,6 +39,12 @@ from app.schemas.education import EducationCreate, EducationUpdate
 from app.schemas.experience import ExperienceCreate, ExperienceUpdate
 from app.schemas.preference import JobPreferenceCreate, JobPreferenceUpdate
 from app.schemas.project import ProjectCreate, ProjectUpdate
+from app.services.answer_library import (
+    AnswerEvidence,
+    AnswerLibrary,
+    KnowledgeReport,
+    SavedAnswerView,
+)
 from app.services.answer_safety import is_forbidden_answer_storage
 from app.services.application_answer_matching import (
     AnswerBankReview,
@@ -365,9 +371,119 @@ class CandidateService:
         await self.repository.session.refresh(preference)
         return preference
 
-    async def list_answers_for_user(self, user: User) -> list[ApplicationAnswer]:
+    async def list_answers_for_user(
+        self,
+        user: User,
+        *,
+        query: str | None = None,
+        category: str | None = None,
+        trust: str | None = None,
+    ) -> list[ApplicationAnswer]:
+        """List the user's saved answers, optionally filtered by the library.
+
+        Filtering is deterministic and read-only: a category is derived from
+        the question wording and a trust level from stored provenance.
+        """
         candidate = await self.ensure_profile_for_user(user)
-        return list(await self.repository.get_answers(candidate.id))
+        answers = list(await self.repository.get_answers(candidate.id))
+        if query or category or trust:
+            library = AnswerLibrary()
+            answers = [
+                answer
+                for answer in answers
+                if library.matches(
+                    answer,
+                    query=query,
+                    category=category,
+                    trust=trust,
+                    library=library,
+                )
+            ]
+        return answers
+
+    async def saved_answers_for_user(
+        self,
+        user: User,
+        *,
+        query: str | None = None,
+        category: str | None = None,
+        trust: str | None = None,
+    ) -> list[SavedAnswerView]:
+        """Saved answers with derived category, trust and freshness."""
+        candidate = await self.ensure_profile_for_user(user)
+        answers = await self.list_answers_for_user(
+            user, query=query, category=category, trust=trust
+        )
+        library = AnswerLibrary()
+        return list(
+            library.describe_many(
+                answers,
+                candidate=candidate,
+                profile_values=profile_answers(candidate, user),
+            )
+        )
+
+    async def answer_detail_for_user(
+        self, user: User, question_key: str
+    ) -> tuple[SavedAnswerView, tuple[AnswerEvidence, ...]]:
+        """Return one saved answer with its evidence and detected conflicts."""
+        candidate = await self.ensure_profile_for_user(user)
+        normalised = question_key.strip().lower()
+        answer = await self.repository.get_answer_by_key(candidate.id, normalised)
+        if answer is None:
+            raise ResourceNotFoundError(
+                f"No reusable answer is stored for '{normalised}'."
+            )
+        values = profile_answers(candidate, user)
+        library = AnswerLibrary()
+        all_answers = list(await self.repository.get_answers(candidate.id))
+        views = library.describe_many(
+            all_answers, candidate=candidate, profile_values=values
+        )
+        view = next(
+            (item for item in views if item.answer.id == answer.id), None
+        ) or library.describe(answer)
+        return view, library.evidence_for(answer, profile_values=values)
+
+    async def answer_categories_for_user(self, user: User) -> dict[str, Any]:
+        """Category and trust counts for the answer library filters."""
+        candidate = await self.ensure_profile_for_user(user)
+        answers = list(await self.repository.get_answers(candidate.id))
+        library = AnswerLibrary()
+        counts, present = library.category_counts(answers)
+        trust_counts: dict[str, int] = {}
+        for answer in answers:
+            level = library.trust_for(answer).level
+            trust_counts[level] = trust_counts.get(level, 0) + 1
+        return {
+            "total": len(answers),
+            "categories": [
+                {
+                    "category": category,
+                    "label": library.category_label(category),
+                    "count": counts[category],
+                }
+                for category in present
+            ],
+            "trust_levels": trust_counts,
+        }
+
+    async def knowledge_for_user(self, user: User) -> KnowledgeReport:
+        """Report missing, conflicting, outdated and unverified knowledge.
+
+        Read-only: nothing here edits the profile, a saved answer or a verified
+        fact. Every item must be resolved explicitly by the user.
+        """
+        candidate = await self.ensure_profile_for_user(user)
+        answers = list(await self.repository.get_answers(candidate.id))
+        completeness = await self.completeness_for_user(user)
+        library = AnswerLibrary()
+        return library.knowledge_report(
+            answers,
+            candidate=candidate,
+            profile_values=profile_answers(candidate, user),
+            profile_fields=completeness.get("fields", []),
+        )
 
     async def upsert_answer_for_user(
         self, user: User, question_key: str, payload: ApplicationAnswerUpdate
@@ -725,7 +841,22 @@ class CandidateService:
             create_payload = ApplicationAnswerCreate.model_validate(create_values)
             return await self.add_answer(candidate_id, create_payload)
 
+        previous_value = (existing.answer or "").strip()
+        incoming_value = (values.get("answer") or "").strip()
+        answer_changed = "answer" in values and incoming_value != previous_value
+
         answer = await self.repository.update_answer(existing, values)
+        if answer_changed and payload.verification_status is None:
+            # Changed wording is no longer the value the user confirmed. Keep
+            # explicit provenance overrides, but never leave a stale
+            # "verified" label on an edited answer.
+            answer.verification_status = VerificationStatus.UNKNOWN
+            answer.verified_at = None
+            answer.last_confirmed_at = None
+            if "answer_source" not in values:
+                answer.answer_source = AnswerSource.USER_ENTERED
+            if "confidence" not in values:
+                answer.confidence = 0.5
         self._sync_verification(
             answer,
             payload.verification_status,

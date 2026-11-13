@@ -337,20 +337,30 @@ async def test_session_is_user_scoped(
     ).status_code == 404
 
 
-async def test_job_board_links_are_never_opened(
+async def test_job_board_listing_opens_for_the_easy_apply_hand_off(
     client: AsyncClient, session_factory: SessionFactory, browser_runtime: Any
 ) -> None:
+    """A Glassdoor listing is a supported starting page for Easy Apply.
+
+    The listing itself is opened; the form destination is never followed until
+    the user starts the application and the destination is validated.
+    """
+    listing = "https://www.glassdoor.com/job-listing/backend-JV_1.htm"
     user, preview = await prepare_application(
         client,
         session_factory,
         email="board@example.com",
         google_sub="google-board",
-        job_url="https://www.glassdoor.com/job-listing/backend-JV_1.htm",
+        job_url=listing,
     )
     body = await start_session(client, user, preview["application_id"])
-    assert body.status_code == 400
-    assert body.json()["code"] == "job_board_url_not_supported"
-    assert browser_runtime.driver.opened == []
+    assert body.status_code == 200, body.text
+    payload = body.json()
+    assert payload["current_url"] == listing
+    assert payload["redirect_flow"] is True
+    assert payload["redirect_status"] == "awaiting_user_action"
+    assert payload["destination_validated"] is False
+    assert browser_runtime.driver.opened == [listing]
 
 
 async def test_private_destination_is_rejected_before_launch(
