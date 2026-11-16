@@ -171,6 +171,7 @@ class _FieldInput:
     classification: FieldClassification
     field_type: FormFieldType
     key: str
+    question_key: str = ""
     source: FieldSourceMatch = field(default_factory=FieldSourceMatch)
 
 
@@ -193,11 +194,20 @@ class FieldSourceMatcher:
     def __init__(self, matcher: ApplicationAnswerMatcher | None = None) -> None:
         self.matcher = matcher or ApplicationAnswerMatcher()
 
-    def _descriptor(self, raw: RawFormField, category: FieldCategory) -> QuestionDescriptor:
+    def question_key_for(self, raw: RawFormField, category: FieldCategory) -> str:
+        """Return the questionnaire key this control maps to.
+
+        A semantic identification of the control's own text wins; otherwise the
+        classified category's canonical key is used. The value is stable for the
+        same control, so a confirmed answer and a detected field can be joined.
+        """
         identified = self.matcher.identify_field_category(
             f"{raw.label} {raw.name or ''} {raw.placeholder or ''}"
         )
-        key = identified or _CATEGORY_KEYS.get(category, "")
+        return identified or _CATEGORY_KEYS.get(category, "")
+
+    def _descriptor(self, raw: RawFormField, category: FieldCategory) -> QuestionDescriptor:
+        key = self.question_key_for(raw, category)
         field_type = field_type_for(raw)
         return QuestionDescriptor(
             question_key=key,
@@ -378,6 +388,9 @@ class ApplicationFormAnalyzer:
                     classification=classification,
                     field_type=field_type,
                     key=_stable_id(raw, index, seen),
+                    question_key=self.source_matcher.question_key_for(
+                        raw, classification.category
+                    ),
                     source=decision[0],
                 )
             )
@@ -436,6 +449,7 @@ class ApplicationFormAnalyzer:
             detected.append(
                 DetectedFormField(
                     field_id=row.key,
+                    question_key=row.question_key or None,
                     form_index=row.raw.form_index,
                     label=row.raw.label[:500],
                     field_type=row.field_type,

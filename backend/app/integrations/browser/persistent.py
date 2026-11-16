@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import re
+import sys
 import time
 import uuid
 from functools import partial
@@ -32,6 +34,7 @@ from typing import Protocol
 from urllib.parse import urlsplit
 
 from app.core.config import Settings
+from app.core.event_loop import loop_supports_subprocess
 from app.core.logging import get_logger
 from app.integrations.browser.field_actions import (
     FieldAction,
@@ -241,6 +244,51 @@ _MARK_OPTIONS_JS = """
 """
 
 
+async def _close_partial_launch(
+    playwright: object | None,
+    browser: object | None,
+    context: object | None,
+) -> None:
+    """Close whatever a failed launch created, without masking the real error.
+
+    ``playwright.stop()`` alone can leave the Chromium child process behind, so
+    the context and browser are closed explicitly, innermost first. Every step
+    is best-effort: a cleanup failure must not replace the launch error the
+    caller reports.
+    """
+    for label, target in (("context", context), ("browser", browser)):
+        if target is None:
+            continue
+        try:
+            await target.close()  # type: ignore[attr-defined]
+        except Exception as exc:
+            logger.info(
+                "Partial browser launch cleanup failed",
+                extra={
+                    "stage": "browser_session_cleanup",
+                    "target": label,
+                    "error_class": type(exc).__name__,
+                },
+            )
+    if playwright is None:
+        return
+    try:
+        await playwright.stop()  # type: ignore[attr-defined]
+    except Exception as exc:
+        logger.info(
+            "Playwright stop after a failed launch raised",
+            extra={
+                "stage": "browser_session_cleanup",
+                "target": "playwright",
+                "error_class": type(exc).__name__,
+            },
+        )
+
+
+#: How long to wait for the file input itself before checking the widget text.
+_UPLOAD_VERIFY_TIMEOUT_MS = 2_000
+
+
 class _PlaywrightHandle:
     """Owns one Chromium context and enforces the navigation policy."""
 
@@ -284,6 +332,22 @@ class _PlaywrightHandle:
         if not is_navigation:
             # Subresources (CSS, fonts, images) are not browser navigations and
             # do not create an SSRF path back into the API.
+            await route.continue_()  # type: ignore[attr-defined]
+            return
+        # A subframe navigation is also a "navigation request": the CAPTCHA and
+        # consent widgets every real ATS embeds load that way. It is not a path
+        # out of the approved page - only a top-level navigation changes which
+        # site the agent is driving - and refusing it both breaks the employer's
+        # widget and (because it marked the session unsafe) closed the session on
+        # Greenhouse and Lever. The policy is therefore enforced on main-frame
+        # requests; field actions resolve inside the main frame only.
+        frame = None
+        try:
+            frame = request.frame  # type: ignore[attr-defined]
+            is_main_frame = frame is None or frame == self._page.main_frame  # type: ignore[attr-defined]
+        except Exception:  # pragma: no cover - defensive: fail closed
+            is_main_frame = True
+        if frame is not None and not is_main_frame:
             await route.continue_()  # type: ignore[attr-defined]
             return
         url = request.url  # type: ignore[attr-defined]
@@ -554,10 +618,14 @@ class _PlaywrightHandle:
             if action.kind is FieldActionKind.CHECK:
                 return await self._check(locator, action, token)
             return await self._fill(locator, action)
-        except Exception:  # pragma: no cover - employer page behaviour
+        except Exception as exc:  # pragma: no cover - employer page behaviour
             logger.info(
                 "Field action could not be completed",
-                extra={"stage": "field_action", "field_kind": action.kind.value},
+                extra={
+                    "stage": "field_action",
+                    "field_kind": action.kind.value,
+                    "error_class": type(exc).__name__,
+                },
             )
             return FieldActionResult(
                 False,
@@ -712,15 +780,34 @@ class _PlaywrightHandle:
                 )
 
         affirmative = not wanted or wanted[0] in {"yes", "true", "1", "on"}
-        if affirmative and await locator.is_checked():  # type: ignore[attr-defined]
-            return FieldActionResult(True, action.field_id, observed_value="true")
+        # Re-read the live state immediately before interacting. The planner only
+        # marks a checkbox ready when it was unchecked at analysis time, so a
+        # checkbox that is checked now was changed after the plan was approved.
+        checked_now = await locator.is_checked()  # type: ignore[attr-defined]
+        if affirmative and checked_now:
+            # Already in the approved state: nothing is changed.
+            return FieldActionResult(True, action.field_id, observed_value="yes")
+        if not affirmative and not checked_now:
+            # The approved plan also leaves it unchecked: nothing is changed.
+            return FieldActionResult(True, action.field_id, observed_value="no")
         if affirmative:
             await locator.check()  # type: ignore[attr-defined]
         else:
-            await locator.uncheck()  # type: ignore[attr-defined]
+            # The approved plan says this box stays unchecked, but the page shows
+            # it checked. Unchecking would silently undo the user's change.
+            return FieldActionResult(
+                False,
+                action.field_id,
+                observed_value="yes",
+                reason=(
+                    "This checkbox changed after you approved the plan, so "
+                    "ApplyPilot left it untouched."
+                ),
+                requires_review=True,
+            )
         checked = await locator.is_checked()  # type: ignore[attr-defined]
         return FieldActionResult(
-            True, action.field_id, observed_value="true" if checked else "false"
+            True, action.field_id, observed_value="yes" if checked else "no"
         )
 
     async def _upload(self, locator: object, action: FieldAction) -> FieldActionResult:
@@ -743,14 +830,38 @@ class _PlaywrightHandle:
                 True, action.field_id, observed_value=str(existing)
             )
         await locator.set_input_files(action.upload_path)  # type: ignore[attr-defined]
-        observed = await locator.evaluate(  # type: ignore[attr-defined]
-            "(el) => el.files && el.files.length ? el.files[0].name : ''"
-        )
+        observed = await self._accepted_upload_name(locator, action.upload_path)
         return FieldActionResult(
             bool(observed),
             action.field_id,
-            observed_value=str(observed) if observed else None,
+            observed_value=observed or None,
         )
+
+    async def _accepted_upload_name(self, locator: object, upload_path: str) -> str:
+        """Return the filename the employer's form accepted, or ``""``.
+
+        Some ATS (Greenhouse) swap the ``<input type=file>`` for a fresh node as
+        soon as the file is accepted, so reading the input back after a
+        successful selection either detaches or reports an empty list. Reading
+        only the input therefore reported a *successful* upload as failed. The
+        widget's own rendering of the chosen filename is checked next, and only
+        an absent filename counts as a rejection.
+        """
+        name = os.path.basename(upload_path)
+        try:
+            observed = await locator.evaluate(  # type: ignore[attr-defined]
+                "(el) => el.files && el.files.length ? el.files[0].name : ''",
+                timeout=_UPLOAD_VERIFY_TIMEOUT_MS,
+            )
+        except Exception:
+            observed = ""
+        if observed:
+            return str(observed)
+        try:
+            shown = await locator.page.get_by_text(name, exact=False).count()  # type: ignore[attr-defined]
+        except Exception:
+            return ""
+        return name if shown else ""
 
     @property
     def unsafe_navigation(self) -> bool:
@@ -793,6 +904,27 @@ class PlaywrightPersistentBrowserDriver:
             raise BrowserUnavailableError(
                 "Browser automation is disabled (APPLICATION_AUTOMATION_ENABLED=false)."
             )
+        # Playwright starts Chromium through asyncio.create_subprocess_exec,
+        # which a Windows selector loop does not implement. Detect that here,
+        # before Playwright is started, so the operator gets the fix instead of
+        # a bare NotImplementedError inside Playwright's transport.
+        running_loop = asyncio.get_running_loop()
+        if not loop_supports_subprocess(running_loop):
+            logger.warning(
+                "Browser launch refused: Windows selector event loop",
+                extra={
+                    "stage": "browser_session_open",
+                    "reason": "incompatible_event_loop",
+                    "loop_class": type(running_loop).__name__,
+                },
+            )
+            raise BrowserUnavailableError(
+                "Playwright cannot launch Chromium on a Windows selector event "
+                "loop. Start the backend with 'python -m scripts.run_server' "
+                "from backend/ (see backend/README.md) instead of 'uvicorn "
+                "app.main:app --reload'."
+            )
+
         try:
             from playwright.async_api import async_playwright
         except ImportError as exc:  # pragma: no cover - optional dependency
@@ -801,6 +933,8 @@ class PlaywrightPersistentBrowserDriver:
             ) from exc
 
         playwright = await async_playwright().start()
+        browser: object | None = None
+        context: object | None = None
         try:
             # Fixed hardening flags, the V8 heap ceiling and (when enabled)
             # the validated-DNS pin all live in launch_policy so they are
@@ -832,14 +966,12 @@ class PlaywrightPersistentBrowserDriver:
                 await page.goto(url, wait_until="domcontentloaded")
             except Exception as exc:
                 if handle.unsafe_navigation:
-                    await handle.close()
                     raise UnsafeNavigationError(
                         "The employer's page redirected outside the approved site.",
                         code="navigation_blocked",
                     ) from exc
                 raise
             if handle.unsafe_navigation:
-                await handle.close()
                 raise BrowserUnavailableError(
                     "The employer's page redirected outside the approved site."
                 )
@@ -853,15 +985,18 @@ class PlaywrightPersistentBrowserDriver:
             )
             return handle
         except (BrowserUnavailableError, UnsafeNavigationError):
-            with contextlib.suppress(Exception):
-                await playwright.stop()
+            await _close_partial_launch(playwright, browser, context)
             raise
         except Exception as exc:
-            with contextlib.suppress(Exception):
-                await playwright.stop()
+            await _close_partial_launch(playwright, browser, context)
             logger.warning(
                 "Browser session could not be opened",
-                extra={"stage": "browser_session_open", "error_class": type(exc).__name__},
+                extra={
+                    "stage": "browser_session_open",
+                    "error_class": type(exc).__name__,
+                    "error": str(exc)[:300],
+                    "platform": sys.platform,
+                },
             )
             raise BrowserUnavailableError(
                 "The browser session could not be opened."

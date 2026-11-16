@@ -480,6 +480,46 @@ async def test_expired_session_is_reported_and_never_pretended(
     assert reopened.json()["browser_status"] == BrowserSessionStatus.OPEN.value
 
 
+async def test_activity_renews_the_idle_window_but_idleness_still_expires(
+    client: AsyncClient, session_factory: SessionFactory, browser_runtime: Any
+) -> None:
+    """The TTL is an *idle* timeout, not a hard limit from ``started_at``.
+
+    Regression: ``last_activity_at`` moved on every read while ``expires_at``
+    stayed pinned to ``started_at + TTL``, so a browser the user was actively
+    filling was closed after 15 minutes and the workspace reported it expired.
+    """
+    user, preview = await prepare_application(client, session_factory)
+    application_id = preview["application_id"]
+    started = await start_session(client, user, application_id)
+    assert started.status_code == 200, started.text
+    first_expiry = started.json()["expires_at"]
+
+    # 2 x 10 minutes of genuine use: 20 minutes, past the 15 minute TTL.
+    body: dict[str, Any] = {}
+    for _ in range(2):
+        browser_runtime.clock.advance(600)
+        fetched = await client.get(
+            f"{BROWSER}/by-application/{application_id}", headers=bearer(user)
+        )
+        assert fetched.status_code == 200, fetched.text
+        body = fetched.json()
+        assert body["browser_status"] == BrowserSessionStatus.OPEN.value
+        assert body["active"] is True
+
+    assert body["expires_at"] != first_expiry
+    assert browser_runtime.driver.handles[0].closed is False
+
+    # Abandoned afterwards: the window lapses and the browser is closed.
+    browser_runtime.clock.advance(901)
+    expired = await client.get(
+        f"{BROWSER}/by-application/{application_id}", headers=bearer(user)
+    )
+    assert expired.status_code == 200, expired.text
+    assert expired.json()["browser_status"] == BrowserSessionStatus.EXPIRED.value
+    assert browser_runtime.driver.handles[0].closed is True
+
+
 async def test_browser_unavailable_is_reported_honestly(
     client: AsyncClient, session_factory: SessionFactory, browser_runtime: Any
 ) -> None:

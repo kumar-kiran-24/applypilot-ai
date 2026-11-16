@@ -36,7 +36,9 @@ from app.services.application_platforms import (
     DetectionConfidence,
     PlatformDetection,
     detect_platform,
+    is_job_board_url,
     listing_source_for_url,
+    normalize_application_url,
 )
 from app.services.application_service import ApplicationService
 from app.services.application_url_security import (
@@ -97,12 +99,18 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+MANUAL_DESTINATION_MESSAGE = (
+    "The application destination was saved from your own input and validated. "
+    "ApplyPilot did not detect it automatically."
+)
+
+
 @dataclass(frozen=True)
 class RedirectOutcome:
     """Result of inspecting the live page for an application hand-off."""
 
     application_id: uuid.UUID
-    browser_session_id: uuid.UUID
+    browser_session_id: uuid.UUID | None
     status: RedirectStatus
     message: str
     listing_url: str | None
@@ -115,6 +123,7 @@ class RedirectOutcome:
     awaiting_user_action: bool
     can_analyze: bool
     authentication_required: bool = False
+    manual_destination: bool = False
     warnings: tuple[str, ...] = ()
 
     def to_payload(self) -> dict[str, Any]:
@@ -133,6 +142,7 @@ class RedirectOutcome:
             "awaiting_user_action": self.awaiting_user_action,
             "can_analyze": self.can_analyze,
             "authentication_required": self.authentication_required,
+            "manual_destination": self.manual_destination,
             "warnings": list(self.warnings),
         }
 
@@ -153,6 +163,80 @@ class ApplicationRedirectService:
             session, resolver=resolver
         )
         self.resolver = resolver
+
+    async def set_manual_destination(
+        self, user: User, application_id: uuid.UUID, destination_url: str
+    ) -> RedirectOutcome:
+        """Store a destination the user supplied, without claiming detection.
+
+        The original listing and the page the browser opens are untouched; the
+        validated form lives in ``application_destination_url``. The same
+        static and DNS/public-address checks used by the live browser run here,
+        and a job-board link is refused so a listing cannot masquerade as an
+        employer form.
+        """
+        application = await self.applications.get_application(user, application_id)
+        if application.status in FINALIZED_APPLICATION_STATES:
+            raise InvalidOperationError(
+                "A finished application's destination cannot be changed.",
+                code="application_finalized",
+            )
+
+        normalized = normalize_application_url(destination_url)
+        if is_job_board_url(normalized):
+            raise InvalidOperationError(
+                "This link points to a job board. Paste the employer's own "
+                "application form URL instead.",
+                code="job_board_url_not_supported",
+            )
+        normalized, _addresses = await validate_application_destination(
+            normalized, resolver=self.resolver
+        )
+        detection = detect_platform(normalized)
+        display_url = sanitize_url_for_display(normalized)
+
+        application.application_destination_url = display_url
+        application.destination_platform = detection.platform.value
+        application.destination_validated = True
+        application.redirect_status = RedirectStatus.VALIDATED
+        application.redirect_detected_at = _utcnow()
+        application.platform = detection.platform.value
+        application.platform_name = detection.display_name
+        self.session.add(application)
+        await self.session.commit()
+
+        logger.info(
+            "Manual application destination stored",
+            extra={
+                "stage": "application_redirect_manual",
+                "user_id": str(user.id),
+                "application_id": str(application.id),
+                "platform": detection.platform.value,
+            },
+        )
+        return RedirectOutcome(
+            application_id=application.id,
+            browser_session_id=None,
+            status=RedirectStatus.VALIDATED,
+            message=MANUAL_DESTINATION_MESSAGE,
+            listing_url=(
+                application.job_listing_url or application.application_url
+            ),
+            destination_url=display_url,
+            application_platform=detection.platform.value,
+            platform_name=detection.display_name,
+            application_step=None,
+            step_supported=False,
+            destination_validated=True,
+            awaiting_user_action=False,
+            can_analyze=True,
+            manual_destination=True,
+            warnings=(
+                "This destination came from you, not from watching Easy Apply. "
+                "Confirm it is the employer's application form before filling "
+                "anything.",
+            ),
+        )
 
     async def check(self, user: User, application_id: uuid.UUID) -> RedirectOutcome:
         """Inspect the current live page and record a validated destination.

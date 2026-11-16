@@ -1,0 +1,47 @@
+[Unit]
+Description=ApplyPilot AI frontend (Next.js server)
+Documentation=file:///opt/applypilot/backend/docs/phase2e-stage-h-production-pilot.md
+After=network-online.target applypilot-backend.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=applypilot
+Group=applypilot
+WorkingDirectory=/opt/applypilot/frontend
+EnvironmentFile=/etc/applypilot/frontend.env
+Environment=NODE_ENV=production
+Environment=NEXT_TELEMETRY_DISABLED=1
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+# ProtectHome=true hides /home and /root, so HOME must point at a managed,
+# writable path. NPM/Next write small caches under it; /var/lib/applypilot is
+# the only application state directory the service may touch.
+Environment=HOME=/var/lib/applypilot
+
+# `next start` writes the image/fetch cache to .next/cache and fails on a
+# read-only or missing cache directory. The `+` prefix runs this one command
+# unconfined (as root) so it can create the directory before the service starts.
+ExecStartPre=+/usr/bin/install -d -o applypilot -g applypilot -m 0750 /opt/applypilot/frontend/.next/cache
+
+# The package.json "start" script binds 127.0.0.1:3000; Nginx is the only
+# public listener. Build artifacts are produced by `npm run build` at deploy.
+ExecStart=/usr/bin/npm run start
+
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+
+MemoryMax=1G
+LimitNOFILE=32768
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# .next (and therefore .next/cache) plus the HOME above are the only writable
+# paths. Everything else under /opt/applypilot stays read-only at runtime.
+ReadWritePaths=/var/lib/applypilot /opt/applypilot/frontend/.next
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

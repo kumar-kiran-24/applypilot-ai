@@ -21,7 +21,7 @@ the application's selected resume is owned by the same user.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import Any
 
@@ -29,6 +29,12 @@ from app.models.application import AnswerSource, QuestionStatus, QuestionType
 from app.models.application_answer import ApplicationAnswer
 from app.models.candidate import Candidate
 from app.models.resume import Resume
+from app.schemas.application_field import (
+    ApplicationField,
+    FieldProvenance,
+    FieldSensitivity,
+    FieldVerification,
+)
 from app.schemas.application_fill import FillAction, FillFieldStatus
 from app.schemas.application_form import (
     DetectedFormField,
@@ -41,6 +47,7 @@ from app.services.application_answer_matching import (
     MatchedAnswer,
     QuestionDescriptor,
 )
+from app.services.application_field_normalizer import normalise_fields
 
 #: Reuse the Stage B confidence floor; never fill a weakly classified field.
 MINIMUM_CONFIDENCE = 0.75
@@ -110,6 +117,76 @@ class PlannedField:
     reason: str = ""
     html_id: str | None = None
     name: str | None = None
+    # --- Phase 2J.3 canonical attributes ---------------------------------
+    question_key: str | None = None
+    accessible_name: str = ""
+    input_type: str = "text"
+    sensitivity: FieldSensitivity = FieldSensitivity.PUBLIC
+    verification_status: FieldVerification = FieldVerification.UNVERIFIED
+    source_record_id: str | None = None
+    source_explanation: str = ""
+    last_confirmed_at: Any | None = None
+    current_value: str | None = None
+    candidate_answer: str | None = None
+    form_index: int = 0
+    page_url: str | None = None
+    application_step: str | None = None
+    analyzed_at: Any | None = None
+    locator_ref: str = ""
+    duplicate_of: str | None = None
+    fillable: bool = False
+    requires_confirmation: bool = False
+    already_populated: bool = False
+    conflicted: bool = False
+
+    def canonical(self, *, step: str | None = None) -> ApplicationField:
+        """Return the canonical field, with plan decisions applied."""
+        return ApplicationField(
+            field_id=self.field_id,
+            question_key=self.question_key,
+            name=self.name,
+            label=self.label,
+            accessible_name=self.accessible_name,
+            options=list(self.options),
+            field_type=self.field_type,
+            input_type=self.input_type,
+            classification=self.classification,
+            required=self.required,
+            current_value=self.current_value,
+            proposed_value=self.proposed_value if self.shows_value else None,
+            candidate_answer=(
+                self.candidate_answer if self.shows_value else None
+            ),
+            source=self.source,
+            provenance=FieldProvenance(
+                source=self.source,
+                source_record_id=self.source_record_id,
+                last_confirmed_at=self.last_confirmed_at,
+                confidence=self.confidence,
+                stale=self.verification_status is not FieldVerification.VERIFIED
+                and self.status is FillFieldStatus.NEEDS_CONFIRMATION,
+                explanation=self.source_explanation,
+            ),
+            verification_status=self.verification_status,
+            sensitivity=self.sensitivity,
+            # Derived from the planner's final decision, not from the Stage B
+            # suggestion, so the preview cannot claim a field is fillable while
+            # execution will skip it (or vice versa).
+            fillable=self.status is FillFieldStatus.READY,
+            requires_confirmation=(
+                self.requires_confirmation
+                or self.status is FillFieldStatus.NEEDS_CONFIRMATION
+                or self.sensitivity is not FieldSensitivity.PUBLIC
+            ),
+            already_populated=self.already_populated,
+            conflicting=self.conflicted,
+            form_index=self.form_index,
+            page_url=self.page_url,
+            application_step=self.application_step or step,
+            locator_ref=self.locator_ref,
+            analyzed_at=self.analyzed_at,
+            duplicate_of=self.duplicate_of,
+        )
 
     @property
     def persisted(self) -> dict[str, Any]:
@@ -202,6 +279,11 @@ def _normalise(value: str) -> str:
 
 def _descriptor(planned: DetectedFormField) -> QuestionDescriptor:
     return QuestionDescriptor(
+        # The detected control's questionnaire key is the join to a confirmed
+        # ``ApplicationQuestion`` answer. Without it the same control could be
+        # answered on the questionnaire and still be filled from a different
+        # profile value.
+        question_key=planned.question_key or "",
         question_text=planned.label,
         field_identifier=planned.html_id or planned.name,
         help_text=planned.help_text,
@@ -215,7 +297,14 @@ def _descriptor(planned: DetectedFormField) -> QuestionDescriptor:
 
 def _action_for(planned: DetectedFormField) -> FillAction:
     if planned.field_type is FormFieldType.FILE:
-        return FillAction.UPLOAD
+        # Only a resume upload slot may receive a file automatically. A cover
+        # letter, portfolio or an unclassified file control is left to the user
+        # rather than being handed the resume PDF.
+        return (
+            FillAction.UPLOAD
+            if planned.classification is FieldCategory.RESUME_UPLOAD
+            else FillAction.NONE
+        )
     if planned.field_type in {FormFieldType.SELECT, FormFieldType.RADIO_GROUP}:
         return FillAction.SELECT
     if planned.field_type in {FormFieldType.CHECKBOX, FormFieldType.CHECKBOX_GROUP}:
@@ -295,14 +384,25 @@ class FieldExecutionPlanner:
         reusable_answers: list[ApplicationAnswer] | None = None,
         user_answers: dict[str, str] | None = None,
         resume_owned: bool = True,
+        page_url: str | None = None,
+        application_step: str | None = None,
+        analyzed_at: Any | None = None,
     ) -> FillPlan:
         rows: list[PlannedField] = []
         file_fields: list[PlannedField] = []
         warnings: list[str] = []
 
-        for item in fields:
+        canonical = normalise_fields(
+            fields,
+            page_url=page_url,
+            application_step=application_step,
+            analyzed_at=analyzed_at,
+        )
+
+        for item, normalised in zip(fields, canonical, strict=False):
             row = self._plan_field(
                 item,
+                normalised,
                 candidate=candidate,
                 reusable_answers=reusable_answers or [],
                 user_answers=user_answers or {},
@@ -360,6 +460,13 @@ class FieldExecutionPlanner:
                 f"{confirmations} field{'s' if confirmations != 1 else ''} need your "
                 "confirmation before anything is typed into the employer's page."
             )
+        conflicts = sum(1 for item in rows if item.conflicted)
+        if conflicts:
+            warnings.append(
+                f"Conflicting information was found in {conflicts} "
+                f"field{'s' if conflicts != 1 else ''}. Choose the correct answer "
+                "before filling."
+            )
         return FillPlan(
             fields=rows,
             resume=planned_resume,
@@ -370,6 +477,7 @@ class FieldExecutionPlanner:
     def _plan_field(
         self,
         item: DetectedFormField,
+        normalised: ApplicationField,
         *,
         candidate: Candidate | None,
         reusable_answers: list[ApplicationAnswer],
@@ -387,7 +495,30 @@ class FieldExecutionPlanner:
             options=list(item.options),
             html_id=item.html_id,
             name=item.name,
+            question_key=normalised.question_key,
+            accessible_name=normalised.accessible_name,
+            input_type=normalised.input_type,
+            sensitivity=normalised.sensitivity,
+            verification_status=normalised.verification_status,
+            source_record_id=normalised.provenance.source_record_id,
+            source_explanation=normalised.provenance.explanation,
+            last_confirmed_at=normalised.provenance.last_confirmed_at,
+            current_value=normalised.current_value,
+            form_index=normalised.form_index,
+            page_url=normalised.page_url,
+            application_step=normalised.application_step,
+            analyzed_at=normalised.analyzed_at,
+            locator_ref=normalised.locator_ref,
+            duplicate_of=normalised.duplicate_of,
+            already_populated=normalised.already_populated,
         )
+
+        if normalised.duplicate_of:
+            return self._human(
+                row,
+                "The same control appears more than once in this analysis; it is "
+                "left for you to check.",
+            )
 
         # Verification, legal, demographic and ambiguous controls first.
         if item.field_type is FormFieldType.PASSWORD:
@@ -434,6 +565,7 @@ class FieldExecutionPlanner:
             row.reason = "No safe value matched this optional field."
             return row
 
+        row.candidate_answer = matched.value
         value = _valid_for_shape(item, matched.value or "")
         if value is None:
             return self._human(
@@ -449,6 +581,14 @@ class FieldExecutionPlanner:
         row.source = source
         row.confidence = max(row.confidence, matched.confidence)
 
+        if matched.conflicts:
+            row.status = FillFieldStatus.NEEDS_CONFIRMATION
+            row.conflicted = True
+            row.reason = (
+                matched.explanation
+                or "Conflicting answers were found and must be resolved by you."
+            )
+            return row
         if matched.stale:
             row.status = FillFieldStatus.NEEDS_CONFIRMATION
             row.reason = matched.explanation or (
@@ -480,10 +620,33 @@ class FieldExecutionPlanner:
     ) -> MatchedAnswer | None:
         descriptor = _descriptor(item)
 
-        # A value the user explicitly confirmed for this application wins.
+        # A value the user explicitly confirmed for this application wins, but
+        # it must not silently override a different verified profile value: that
+        # disagreement is surfaced for resolution instead of guessed.
         if user_answers:
             matched = self.matcher.match_reusable_answers(descriptor, user_answers)
             if matched is not None and matched.value:
+                profile = self.matcher.match_candidate_profile(descriptor, candidate)
+                if (
+                    profile is not None
+                    and profile.value
+                    and not matched.is_sensitive
+                    and _normalise(profile.value).casefold()
+                    != _normalise(matched.value).casefold()
+                ):
+                    return replace(
+                        matched,
+                        requires_confirmation=True,
+                        conflicts=(
+                            *matched.conflicts,
+                            "your verified profile has a different value for this field",
+                        ),
+                        explanation=(
+                            "Conflicting information: your confirmed answer for "
+                            "this application differs from your verified profile. "
+                            "Confirm which one to use."
+                        ),
+                    )
                 return matched
 
         matched = self.matcher.match_candidate_profile(descriptor, candidate)
@@ -543,7 +706,13 @@ class FieldExecutionPlanner:
     @staticmethod
     def _human(row: PlannedField, reason: str) -> PlannedField:
         row.status = FillFieldStatus.NEEDS_HUMAN_INPUT
-        row.action = FillAction.NONE if row.action is not FillAction.UPLOAD else row.action
+        # Only the selected resume may keep an upload action; every other
+        # control that reaches human review is not automatable.
+        if not (
+            row.action is FillAction.UPLOAD
+            and row.classification is FieldCategory.RESUME_UPLOAD
+        ):
+            row.action = FillAction.NONE
         row.reason = reason
         row.proposed_value = None
         return row

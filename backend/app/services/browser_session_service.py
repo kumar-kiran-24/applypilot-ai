@@ -16,10 +16,12 @@ capability is reported separately by :mod:`app.integrations.browser.view`.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
@@ -77,6 +79,11 @@ EXPIRED_MESSAGE = (
     "employer's page; start the session again to reopen it."
 )
 
+RECOVERY_BLOCKED_MESSAGE = (
+    "A live browser session is open for another application. End that session "
+    "before starting this one, or recover it explicitly."
+)
+
 
 class BrowserSessionNotFoundError(ResourceNotFoundError):
     """No browser session exists for this application and user."""
@@ -117,6 +124,29 @@ class BrowserSessionExpiredError(InvalidOperationError):
 
     code = "browser_session_expired"
     message = EXPIRED_MESSAGE
+
+
+@dataclass(frozen=True)
+class SessionBlocker:
+    """Another live session owned by the same user."""
+
+    session_id: uuid.UUID
+    application_id: uuid.UUID
+    job_id: uuid.UUID | None
+    job_title: str
+    company: str | None
+    state: str
+    browser_status: str
+
+
+@dataclass(frozen=True)
+class SessionRecoveryOutcome:
+    """What recovery reconciled, ended, or started."""
+
+    session: BrowserSession | None
+    blocked_by: tuple[SessionBlocker, ...] = ()
+    closed_session_ids: tuple[uuid.UUID, ...] = ()
+    message: str = ""
 
 
 def _utcnow() -> datetime:
@@ -233,15 +263,40 @@ class BrowserSessionService:
         *,
         restart: bool = False,
     ) -> BrowserSession:
-        """Open the employer page, idempotently for an already-live session."""
+        """Open the employer page, idempotently for an already-live session.
+
+        The per-application lock makes two simultaneous starts in this process
+        reuse one row and one browser; the database unique constraint covers
+        a second worker, where the insert loser adopts the winner's row.
+        """
         application = await self.applications.get_application(user, application_id)
+        async with self.manager.application_lock(application.id):
+            return await self._start_locked(user, application, restart=restart)
+
+    async def _start_locked(
+        self,
+        user: User,
+        application: Application,
+        *,
+        restart: bool = False,
+    ) -> BrowserSession:
         if application.status in FINALIZED_APPLICATION_STATES:
             raise InvalidOperationError(
                 "A browser session cannot be started for a finished application.",
                 code="application_finalized",
             )
 
-        adapter, detection = adapter_for_url(application.application_url)
+        # A validated destination (detected automatically or supplied by the
+        # user) is what a new run opens. The original listing stays recorded in
+        # ``job_listing_url`` and ``application_url`` is never replaced.
+        target_url = application.application_url
+        if (
+            application.destination_validated
+            and application.application_destination_url
+        ):
+            target_url = application.application_destination_url
+
+        adapter, detection = adapter_for_url(target_url)
         # A job listing is a supported starting page: ApplyPilot opens it and the
         # user starts Easy Apply. The navigation policy only lets the resulting
         # hand-off reach recognised application-platform domains, and the
@@ -280,7 +335,7 @@ class BrowserSessionService:
         # Resolves and validates every address, then pins one into Chromium's
         # resolver so the name cannot be rebound after validation.
         _, addresses = await validate_application_destination(
-            application.application_url, resolver=self.resolver
+            target_url, resolver=self.resolver
         )
         pinned_address = (
             preferred_address(addresses)
@@ -318,19 +373,62 @@ class BrowserSessionService:
             row.failure_code = None
             row.failure_reason = None
             row.stopped_at = None
-        row.current_url = sanitize_url_for_display(application.application_url)
+        row.current_url = sanitize_url_for_display(target_url)
         row.started_at = now
         row.last_activity_at = now
         row.expires_at = now + timedelta(seconds=self.manager.ttl_seconds)
         transition(row, State.BROWSER_OPENING)
-        await self.session.commit()
+        try:
+            await self.session.commit()
+        except IntegrityError:
+            # Another worker inserted the application's session row first.
+            await self.session.rollback()
+            existing = await self._row_for_application(
+                application.id, user.id, for_update=True
+            )
+            if existing is None:  # pragma: no cover - constraint implies a row
+                raise
+            live = await self.manager.get(existing.id, user_id=user.id)
+            if live is not None:
+                if restart:
+                    raise BrowserSessionConflict(
+                        "A live browser session is already open for this "
+                        "application. Pause or cancel it before starting a new run.",
+                        code="browser_session_already_open",
+                    ) from None
+                live.expires_at_monotonic = (
+                    self.manager.clock() + self.manager.ttl_seconds
+                )
+                existing.last_activity_at = _utcnow()
+                existing.expires_at = existing.last_activity_at + timedelta(
+                    seconds=self.manager.ttl_seconds
+                )
+                await self.session.commit()
+                return await self._reload(existing.id, user.id)
+            row = existing
+            row.run_number += 1
+            row.state = State.CREATED
+            row.browser_status = Status.OPENING
+            row.allowed_origins = list(policy.allowed_origins)
+            row.checkpoint = {}
+            row.paused_from_state = None
+            row.pause_reason = None
+            row.failure_code = None
+            row.failure_reason = None
+            row.stopped_at = None
+            row.current_url = sanitize_url_for_display(target_url)
+            row.started_at = now
+            row.last_activity_at = now
+            row.expires_at = now + timedelta(seconds=self.manager.ttl_seconds)
+            transition(row, State.BROWSER_OPENING)
+            await self.session.commit()
 
         try:
             live = await self.manager.acquire(
                 session_id=row.id,
                 user_id=user.id,
                 application_id=application.id,
-                url=application.application_url,
+                url=target_url,
                 policy=policy,
                 pinned_address=pinned_address,
             )
@@ -355,6 +453,10 @@ class BrowserSessionService:
                     "stage": "browser_session_start",
                     "application_id": str(application.id),
                     "error_class": type(exc).__name__,
+                    # Short message only: enough to diagnose a launch failure
+                    # (for example an incompatible event loop) without logging
+                    # page content or credentials.
+                    "error": str(exc)[:300],
                 },
             )
             await self._mark_unavailable(
@@ -394,6 +496,113 @@ class BrowserSessionService:
             },
         )
         return await self._reload(row.id, user.id)
+
+    # --- Recovery ------------------------------------------------------------
+    async def recover(
+        self,
+        user: User,
+        application_id: uuid.UUID,
+        *,
+        force: bool = False,
+    ) -> SessionRecoveryOutcome:
+        """Reconcile stale rows, then start this application's browser.
+
+        A row that claims to be open while its process browser is gone is the
+        exact state behind the false "one live session" conflict. Recovery
+        always reconciles first. Another genuinely live session is never ended
+        silently: without ``force`` the outcome names it and starts nothing.
+        ``force`` closes only sessions owned by this same user, then starts a
+        new run for this application.
+        """
+        application = await self.applications.get_application(user, application_id)
+        if application.status in FINALIZED_APPLICATION_STATES:
+            raise InvalidOperationError(
+                "A browser session cannot be started for a finished application.",
+                code="application_finalized",
+            )
+
+        rows = list(
+            (
+                await self.session.scalars(
+                    select(BrowserSession)
+                    .where(BrowserSession.user_id == user.id)
+                    .options(
+                        selectinload(BrowserSession.application).selectinload(
+                            Application.job
+                        )
+                    )
+                )
+            ).all()
+        )
+        changed = False
+        current_row: BrowserSession | None = None
+        blockers: list[BrowserSession] = []
+        for row in rows:
+            changed = await self._reconcile(user, row) or changed
+            if row.browser_status is not Status.OPEN:
+                continue
+            if row.application_id == application.id:
+                current_row = row
+            else:
+                blockers.append(row)
+        if changed:
+            await self.session.commit()
+
+        if current_row is not None:
+            return SessionRecoveryOutcome(
+                session=current_row,
+                message="The existing live browser session was reattached.",
+            )
+
+        if blockers and not force:
+            return SessionRecoveryOutcome(
+                session=None,
+                blocked_by=tuple(self._blocker(row) for row in blockers),
+                message=RECOVERY_BLOCKED_MESSAGE,
+            )
+
+        closed: list[uuid.UUID] = []
+        for row in blockers:
+            await self._close_for_recovery(row)
+            closed.append(row.id)
+        if closed:
+            await self.session.commit()
+
+        session = await self.start(user, application_id)
+        return SessionRecoveryOutcome(
+            session=session,
+            closed_session_ids=tuple(closed),
+            message=(
+                "The browser session was recovered."
+                if not closed
+                else "Closed the other live session and started this one."
+            ),
+        )
+
+    async def _close_for_recovery(self, row: BrowserSession) -> None:
+        """Close one owned session so another application can be opened."""
+        if row.state not in {State.CANCELLED, State.COMPLETED_BY_USER}:
+            row.state = State.CANCELLED
+        await self.manager.release(row.id)
+        row.browser_status = Status.CLOSED
+        row.stopped_at = _utcnow()
+        row.pause_reason = "Ended to recover the browser for another application."
+        row.failure_code = "closed_by_recovery"
+        self.session.add(row)
+
+    @staticmethod
+    def _blocker(row: BrowserSession) -> SessionBlocker:
+        application = row.application
+        job = application.job if application is not None else None
+        return SessionBlocker(
+            session_id=row.id,
+            application_id=row.application_id,
+            job_id=application.job_id if application is not None else None,
+            job_title=job.job_title if job is not None else "",
+            company=job.company if job is not None else None,
+            state=row.state.value,
+            browser_status=row.browser_status.value,
+        )
 
     # --- Controls ------------------------------------------------------------
     async def pause(
@@ -491,11 +700,29 @@ class BrowserSessionService:
             row.failure_code = "navigation_blocked"
             row.failure_reason = "The employer's page attempted to leave the approved site."
             return True
+        # Kept below the liveness checks: a dead browser must never be renewed.
         current = sanitize_url_for_display(await live.handle.current_url())
         if current and current != row.current_url:
             row.current_url = current
-        row.last_activity_at = _utcnow()
+        await self._renew(row, user)
         return True
+
+    async def _renew(self, row: BrowserSession, user: User) -> None:
+        """Extend the idle window for a session the user is still using.
+
+        The TTL is an *idle* timeout. Without this, ``expires_at`` stayed fixed
+        at ``started_at + TTL`` while ``last_activity_at`` kept moving, so a
+        browser was closed mid-form after 15 minutes of genuine work and the
+        workspace then honestly - but confusingly - reported it as expired.
+        Every authenticated read that reconciles a live row (status, recovery,
+        form analysis, fill plan, fill, view ticket) counts as activity; an
+        abandoned session still expires on schedule.
+        """
+        row.last_activity_at = _utcnow()
+        if await self.manager.touch(row.id, user_id=user.id):
+            row.expires_at = row.last_activity_at + timedelta(
+                seconds=self.manager.ttl_seconds
+            )
 
     async def _mark_expired(self, row: BrowserSession, *, release: bool = True) -> None:
         if release:
@@ -655,10 +882,13 @@ class BrowserSessionService:
 __all__ = [
     "EXPIRED_MESSAGE",
     "FINALIZED_APPLICATION_STATES",
+    "RECOVERY_BLOCKED_MESSAGE",
     "BrowserSessionCapacityError",
     "BrowserSessionConflict",
     "BrowserSessionExpiredError",
     "BrowserSessionNotFoundError",
     "BrowserSessionService",
     "BrowserSessionUnavailableError",
+    "SessionBlocker",
+    "SessionRecoveryOutcome",
 ]

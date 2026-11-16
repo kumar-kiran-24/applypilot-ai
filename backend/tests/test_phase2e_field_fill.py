@@ -436,8 +436,20 @@ async def test_fill_plan_executes_safe_fields_and_skips_human_steps(
     assert plan["eligible_count"] >= 4
     assert plan["human_input_count"] >= 3
     assert plan["already_filled_count"] == 1
+    # Phase 2J.3: the preview is the approval contract, including a fingerprint
+    # of the exact page, structure and values the user is approving.
+    assert len(plan["approval_fingerprint"]) == 64
+    assert len(plan["structure_fingerprint"]) == 64
+    assert plan["page_url"] == GREENHOUSE_URL
     plan_fields = {item["label"]: item for item in plan["fields"]}
     assert plan_fields["Full name"]["proposed_value"] == "Ada Lovelace"
+    assert plan_fields["Full name"]["verification_status"] == "verified"
+    assert plan_fields["Full name"]["locator_ref"].startswith("field:")
+    assert plan_fields["Preferred name"]["already_populated"] is True
+    assert plan_fields["Preferred name"]["current_value"] == "Ada"
+    assert "html_id" not in plan_fields["Full name"]
+    assert "selector" not in json.dumps(plan_fields)
+    approved = plan["approval_fingerprint"]
     assert plan_fields["Preferred name"]["status"] == "already_filled"
     assert plan_fields["I certify that the information is true and complete"][
         "status"
@@ -447,7 +459,11 @@ async def test_fill_plan_executes_safe_fields_and_skips_human_steps(
     ] is None
     assert "Submit" not in json.dumps(plan_fields)
 
-    started = await client.post(fill_url(application_id), json={}, headers=headers)
+    started = await client.post(
+        fill_url(application_id),
+        json={"approval_fingerprint": approved},
+        headers=headers,
+    )
     assert started.status_code == 200, started.text
     execution = started.json()
     assert execution["status"] == "needs_user_input"
@@ -476,7 +492,11 @@ async def test_fill_plan_executes_safe_fields_and_skips_human_steps(
 
     # Repeating the start call is idempotent for the same analysis version.
     before = len(actions)
-    repeated = await client.post(fill_url(application_id), json={}, headers=headers)
+    repeated = await client.post(
+        fill_url(application_id),
+        json={"approval_fingerprint": approved},
+        headers=headers,
+    )
     assert repeated.status_code == 200, repeated.text
     assert repeated.json()["execution_id"] == execution["execution_id"]
     assert len(actions) == before
@@ -515,12 +535,18 @@ async def test_fill_plan_executes_safe_fields_and_skips_human_steps(
     assert paused.json()["can_resume"] is True
 
     conflict = await client.post(
-        fill_url(application_id), json={}, headers=headers
+        fill_url(application_id),
+        json={"approval_fingerprint": approved},
+        headers=headers,
     )
     assert conflict.status_code == 409
     assert conflict.json()["code"] == "field_fill_paused"
 
-    resumed = await client.post(fill_url(application_id, "/resume"), headers=headers)
+    resumed = await client.post(
+        fill_url(application_id, "/resume"),
+        json={"approval_fingerprint": approved},
+        headers=headers,
+    )
     assert resumed.status_code == 200, resumed.text
     assert resumed.json()["status"] == "needs_user_input"
     # Already-succeeded fields are not re-typed.
@@ -531,7 +557,9 @@ async def test_fill_plan_executes_safe_fields_and_skips_human_steps(
     assert cancelled.json()["status"] == "cancelled"
 
     after_cancel = await client.post(
-        fill_url(application_id, "/resume"), headers=headers
+        fill_url(application_id, "/resume"),
+        json={"approval_fingerprint": approved},
+        headers=headers,
     )
     assert after_cancel.status_code == 409
 
@@ -554,7 +582,11 @@ async def test_fill_plan_is_owner_scoped_and_requires_a_live_session(
     )
     for response in (
         await client.get(fill_url(application_id, "-plan"), headers=bearer(intruder)),
-        await client.post(fill_url(application_id), json={}, headers=bearer(intruder)),
+        await client.post(
+            fill_url(application_id),
+            json={"approval_fingerprint": "a" * 64},
+            headers=bearer(intruder),
+        ),
         await client.get(fill_url(application_id), headers=bearer(intruder)),
         await client.post(
             fill_url(application_id, "/pause"), headers=bearer(intruder)
@@ -591,7 +623,11 @@ async def test_analysis_from_another_session_is_refused(
     assert response.status_code == 409
     assert response.json()["code"] == "analysis_session_mismatch"
 
-    started = await client.post(fill_url(application_id), json={}, headers=bearer(user))
+    started = await client.post(
+        fill_url(application_id),
+        json={"approval_fingerprint": "a" * 64},
+        headers=bearer(user),
+    )
     assert started.status_code == 409
     assert browser_runtime.driver.handles[0].actions == []
 

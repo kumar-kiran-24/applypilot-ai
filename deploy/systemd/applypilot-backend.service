@@ -1,0 +1,60 @@
+[Unit]
+Description=ApplyPilot AI backend (FastAPI, single worker)
+Documentation=file:///opt/applypilot/backend/docs/phase2e-stage-h-production-pilot.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=applypilot
+Group=applypilot
+WorkingDirectory=/opt/applypilot/backend
+# 0600, owned by applypilot. Never put secrets in this unit file.
+EnvironmentFile=/etc/applypilot/backend.env
+Environment=HOME=/var/lib/applypilot
+Environment=PLAYWRIGHT_BROWSERS_PATH=/var/lib/applypilot/ms-playwright
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# EXACTLY ONE WORKER. Live Chromium handles and view tickets are process-local;
+# a second worker would split ownership and break single-use tickets. Do not add
+# --workers until the Redis/worker design in the Stage G document is built.
+ExecStart=/opt/applypilot/.venv/bin/uvicorn app.main:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --workers 1 \
+    --proxy-headers \
+    --forwarded-allow-ips=127.0.0.1 \
+    --no-server-header \
+    --timeout-graceful-shutdown 25
+
+Restart=always
+RestartSec=3
+TimeoutStopSec=35
+KillSignal=SIGTERM
+# Let uvicorn close Chromium cleanly before the cgroup is killed.
+KillMode=mixed
+
+# Resource limits: size MemoryMax against APPLICATION_MAX_ACTIVE_BROWSER_SESSIONS.
+# Chromium is the dominant consumer; 8 sessions fit comfortably in 6G.
+MemoryMax=6G
+MemoryHigh=5500M
+TasksMax=4096
+LimitNOFILE=65535
+
+# Sandboxing. Chromium uses unprivileged user namespaces, not setuid helpers.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/applypilot
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

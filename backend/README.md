@@ -357,8 +357,16 @@ Never edit an applied revision - add a new one instead.
 ```powershell
 cd C:\Agentic_ai\applypilot-ai\backend
 conda activate venv_rating
-uvicorn app.main:app --reload
+python -m scripts.run_server --reload
 ```
+
+Always start the backend through `scripts/run_server.py`, not by invoking
+`uvicorn app.main:app` directly. On Windows, Uvicorn 0.38 picks a
+`SelectorEventLoop` whenever `--reload` (or `--workers`) is used, and a selector
+loop cannot create the subprocess Playwright needs. Live browser sessions then
+fail with `NotImplementedError` and a 503. The launcher installs the Proactor
+policy and passes a Proactor loop factory *before* the application loop starts;
+on Linux it leaves Uvicorn's normal loop selection (`auto`) untouched.
 
 - Swagger UI: <http://127.0.0.1:8000/docs>
 - ReDoc: <http://127.0.0.1:8000/redoc>
@@ -375,7 +383,7 @@ URIs; see "Local host contract" in section 7.
 Binding to another host/port:
 
 ```powershell
-uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
+python -m scripts.run_server --host 0.0.0.0 --port 8080 --reload
 ```
 
 Logs are single-line JSON on stdout; credential-like fields are redacted.

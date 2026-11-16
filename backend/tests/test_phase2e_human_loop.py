@@ -108,7 +108,16 @@ async def prepare_human_loop(
         headers=bearer(user),
     )
     assert analyzed.status_code == 200, analyzed.text
-    filled = await client.post(fill_url(application_id), json={}, headers=bearer(user))
+    planned = await client.get(
+        f"{BROWSER}/by-application/{application_id}/fill-plan",
+        headers=bearer(user),
+    )
+    assert planned.status_code == 200, planned.text
+    filled = await client.post(
+        fill_url(application_id),
+        json={"approval_fingerprint": planned.json()["approval_fingerprint"]},
+        headers=bearer(user),
+    )
     assert filled.status_code == 200, filled.text
     return user, application_id, started.json()
 

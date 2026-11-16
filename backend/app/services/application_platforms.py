@@ -170,18 +170,22 @@ _SPECS_BY_PLATFORM = {spec.platform: spec for spec in PLATFORM_SPECS}
 
 # Job-alert links are never used as application forms. Glassdoor blocks
 # automated access and ApplyPilot does not scrape it or bypass anti-bot checks.
+# The TLD is an explicit shape (``com``, ``co.uk``, ``com.au``) rather than
+# ``[a-z.]+``: otherwise ``glassdoor.com.evil.com`` would be classified as a
+# Glassdoor host.
+_BOARD_TLD = r"(?:[a-z]{2,3}|co\.[a-z]{2}|com\.[a-z]{2})"
 _JOB_BOARD_HOSTS = (
-    r"(^|\.)glassdoor\.[a-z.]+$",
-    r"(^|\.)indeed\.[a-z.]+$",
+    rf"(^|\.)glassdoor\.{_BOARD_TLD}$",
+    rf"(^|\.)indeed\.{_BOARD_TLD}$",
     r"(^|\.)linkedin\.com$",
 )
 
 #: Source board for a listing link. Used for messaging only; the listing URL is
 #: never scraped and is always preserved as ``job_listing_url``.
 _LISTING_SOURCES: tuple[tuple[str, str], ...] = (
-    ("glassdoor", r"(^|\.)glassdoor\.[a-z.]+$"),
-    ("indeed", r"(^|\.)indeed\.[a-z.]+$"),
-    ("linkedin", r"(^|\.)linkedin\.com$"),
+    ("glassdoor", _JOB_BOARD_HOSTS[0]),
+    ("indeed", _JOB_BOARD_HOSTS[1]),
+    ("linkedin", _JOB_BOARD_HOSTS[2]),
 )
 
 _BLOCKED_HOST_SUFFIXES = (".local", ".internal", ".localhost", ".lan", ".home.arpa")

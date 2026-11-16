@@ -25,6 +25,11 @@ from app.core.logging import get_logger
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.common import ErrorResponse
+from app.schemas.job_import import (
+    ImportJobRequest,
+    ImportJobResponse,
+    JobImportExtractionResponse,
+)
 from app.schemas.job_intelligence import (
     LLM_STATUS_DISABLED,
     LLM_STATUS_FAILED,
@@ -46,6 +51,7 @@ from app.schemas.resume_comparison import (
     ResumeComparisonResponse,
 )
 from app.services.job_discovery import fetch_glassdoor_jobs, store_glassdoor_jobs
+from app.services.job_import import import_job_url
 from app.services.job_service import (
     MAX_SEARCH_LENGTH,
     JobService,
@@ -155,6 +161,56 @@ async def discover_jobs(
         jobs_created=created,
         jobs_updated=updated,
         jobs=[job_response(job, best=best.get(job.id)) for job in stored],
+    )
+
+
+@router.post(
+    "/import",
+    response_model=ImportJobResponse,
+    summary="Import a job from a pasted listing URL",
+    description=(
+        "Validates a user-supplied Glassdoor job URL and creates or reuses the "
+        "matching job record. Only exact, supported Glassdoor hosts with a "
+        "job-listing path are accepted; the hostname must resolve to a public "
+        "address. ApplyPilot never fetches or scrapes the pasted URL, never "
+        "follows its redirects and never invents details it cannot read: a "
+        "title derived from the URL slug is labelled as such, and missing "
+        "company, location and description stay empty. Importing the same "
+        "posting twice returns the existing record."
+    ),
+    responses=ERROR_RESPONSES,
+)
+async def import_job(
+    payload: ImportJobRequest,
+    current_user: CurrentUser,
+    db: Database,
+) -> ImportJobResponse:
+    outcome = await import_job_url(db, current_user, payload.url)
+    best = await MatchingService(db).best_matches_for_jobs(
+        current_user, [outcome.job.id]
+    )
+    extraction = outcome.extraction
+    logger.info(
+        "Job import completed",
+        extra={
+            "stage": "job_import",
+            "user_id": str(current_user.id),
+            "job_id": str(outcome.job.id),
+            "created": outcome.created,
+            "title_source": extraction.title_source,
+        },
+    )
+    return ImportJobResponse(
+        job=job_response(outcome.job, best=best.get(outcome.job.id)),
+        created=outcome.created,
+        reused=not outcome.created,
+        extraction=JobImportExtractionResponse(
+            source=extraction.source,
+            title_source=extraction.title_source,
+            description_available=extraction.description_available,
+            missing_fields=list(extraction.missing_fields),
+            notes=list(extraction.notes),
+        ),
     )
 
 

@@ -29,11 +29,15 @@ from app.schemas.application_form import (
 )
 from app.schemas.browser_session import (
     ApplicationRedirectResponse,
+    BrowserSessionBlocker,
     BrowserSessionCapabilitiesResponse,
     BrowserSessionListResponse,
+    BrowserSessionRecoveryResponse,
     BrowserSessionResponse,
     BrowserViewInfo,
+    ManualDestinationRequest,
     PauseBrowserSessionRequest,
+    RecoverBrowserSessionRequest,
     StartBrowserSessionRequest,
 )
 from app.schemas.common import ErrorResponse
@@ -224,6 +228,79 @@ async def detect_application_destination(
     service = ApplicationRedirectService(db)
     outcome = await service.check(current_user, application_id)
     return ApplicationRedirectResponse.model_validate(outcome.to_payload())
+
+
+@router.post(
+    "/by-application/{application_id}/destination",
+    response_model=ApplicationRedirectResponse,
+    summary="Save an application destination supplied by the user",
+    description=(
+        "Use this when Easy Apply is blocked or leads somewhere ApplyPilot does "
+        "not follow. The URL is validated against the same public-address gate "
+        "as the browser and stored as the actual application destination; the "
+        "original listing URL is never replaced. This is not a detection: the "
+        "response says the destination came from your input."
+    ),
+    responses=ERROR_RESPONSES,
+)
+async def set_application_destination(
+    application_id: ApplicationId,
+    payload: ManualDestinationRequest,
+    current_user: CurrentUser,
+    db: Database,
+) -> ApplicationRedirectResponse:
+    service = ApplicationRedirectService(db)
+    outcome = await service.set_manual_destination(
+        current_user, application_id, payload.destination_url
+    )
+    return ApplicationRedirectResponse.model_validate(outcome.to_payload())
+
+
+@router.post(
+    "/by-application/{application_id}/recover",
+    response_model=BrowserSessionRecoveryResponse,
+    summary="Recover the browser session for this application",
+    description=(
+        "Reconciles every session owned by the user before doing anything, so a "
+        "browser that expired or crashed stops counting as live. When another "
+        "application genuinely has a live browser, the response names it and "
+        "starts nothing. `force=true` ends those sessions (owned by this same "
+        "user only) and starts a fresh run for this application."
+    ),
+    responses=ERROR_RESPONSES,
+)
+async def recover_application_session(
+    application_id: ApplicationId,
+    current_user: CurrentUser,
+    db: Database,
+    payload: RecoverBrowserSessionRequest | None = None,
+) -> BrowserSessionRecoveryResponse:
+    service = BrowserSessionService(db)
+    outcome = await service.recover(
+        current_user, application_id, force=bool(payload and payload.force)
+    )
+    return BrowserSessionRecoveryResponse(
+        recovered=outcome.session is not None,
+        session=(
+            _response(service, outcome.session)
+            if outcome.session is not None
+            else None
+        ),
+        blocked_by=[
+            BrowserSessionBlocker(
+                session_id=blocker.session_id,
+                application_id=blocker.application_id,
+                job_id=blocker.job_id,
+                job_title=blocker.job_title,
+                company=blocker.company,
+                state=blocker.state,
+                browser_status=blocker.browser_status,
+            )
+            for blocker in outcome.blocked_by
+        ],
+        closed_session_ids=list(outcome.closed_session_ids),
+        message=outcome.message,
+    )
 
 
 @router.post(

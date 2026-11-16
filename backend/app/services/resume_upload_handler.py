@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
+import shutil
 import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -21,6 +23,34 @@ from app.core.exceptions import InvalidOperationError
 from app.models.resume import Resume
 from app.models.user import User
 from app.services.resume_storage import ResumeStorage, ResumeStorageError, get_resume_storage
+
+#: Characters a browser may safely show as an uploaded filename.
+_UNSAFE_FILENAME = re.compile(r"[^A-Za-z0-9._ -]+")
+
+#: Portable length limit for the name shown by the employer's form.
+_MAX_UPLOAD_NAME = 120
+
+
+def _safe_upload_name(original: str | None) -> str:
+    """Return a harmless filename that still identifies the candidate's resume.
+
+    The employer's form displays the uploaded name, so a random temporary name
+    would present "applypilot-upload-xxxx.pdf" to a recruiter. Only the replica's
+    own basename is used and every non-portable character is replaced; the path
+    is always chosen by ApplyPilot, never by the user.
+    """
+    name = os.path.basename((original or "").replace("\\", "/"))
+    name = _UNSAFE_FILENAME.sub("_", name).strip(" ._-")
+    if not name:
+        name = "resume"
+    if not name.casefold().endswith(".pdf"):
+        name = f"{name}.pdf"
+    if len(name) > _MAX_UPLOAD_NAME:
+        # Truncate the stem, never the extension: the employer must still see a
+        # PDF name even for an unusually long original filename.
+        stem = name[: _MAX_UPLOAD_NAME - 4].rstrip(" ._-") or "resume"
+        name = f"{stem}{name[-4:]}"
+    return name
 
 
 class ResumeUploadHandler:
@@ -54,14 +84,14 @@ class ResumeUploadHandler:
                 "The selected resume file could not be read.",
                 code="resume_unavailable",
             ) from exc
-        handle, temp_path = tempfile.mkstemp(prefix="applypilot-upload-", suffix=".pdf")
-        os.close(handle)
+        directory = tempfile.mkdtemp(prefix="applypilot-upload-")
+        temp_path = os.path.join(directory, _safe_upload_name(owned.original_filename))
         try:
             await asyncio.to_thread(Path(temp_path).write_bytes, data)
             yield temp_path
         finally:
             with contextlib.suppress(OSError):
-                os.unlink(temp_path)
+                shutil.rmtree(directory, ignore_errors=True)
 
 
 __all__ = ["ResumeUploadHandler"]

@@ -1,8 +1,11 @@
 """ApplyPilot AI backend application entry point.
 
-Run with: ``uvicorn app.main:app --reload``
-Docs:     http://127.0.0.1:8000/docs
-Health:   http://127.0.0.1:8000/api/v1/health
+Run from ``backend/`` with ``python -m scripts.run_server`` (add ``--reload``
+for auto-reload). That launcher selects a Playwright-compatible event loop
+before this module is imported; ``uvicorn app.main:app --reload`` selects a
+Windows selector loop and breaks live browser sessions.
+Docs:   http://127.0.0.1:8000/docs
+Health: http://127.0.0.1:8000/api/v1/health
 """
 
 from __future__ import annotations

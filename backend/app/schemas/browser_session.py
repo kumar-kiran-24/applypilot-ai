@@ -24,6 +24,18 @@ class PauseBrowserSessionRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
 
 
+class RecoverBrowserSessionRequest(BaseModel):
+    """``force`` ends the user's other live sessions, explicitly."""
+
+    force: bool = False
+
+
+class ManualDestinationRequest(BaseModel):
+    """An employer application URL supplied by the user."""
+
+    destination_url: str = Field(min_length=1, max_length=1000)
+
+
 class BrowserViewInfo(BaseModel):
     """Whether this deployment can render the live browser to the user."""
 
@@ -75,7 +87,7 @@ class ApplicationRedirectResponse(BaseModel):
     """Where an Easy Apply hand-off landed, with honest validation state."""
 
     application_id: UUID
-    browser_session_id: UUID
+    browser_session_id: UUID | None = None
     status: str
     message: str
     listing_url: str | None = None
@@ -88,12 +100,36 @@ class ApplicationRedirectResponse(BaseModel):
     awaiting_user_action: bool = False
     can_analyze: bool = False
     authentication_required: bool = False
+    #: True only when the destination came from user input, not detection.
+    manual_destination: bool = False
     warnings: list[str] = Field(default_factory=list)
 
 
 class BrowserSessionListResponse(BaseModel):
     total: int
     sessions: list[BrowserSessionResponse]
+
+
+class BrowserSessionBlocker(BaseModel):
+    """Another live session that prevents starting one for this application."""
+
+    session_id: UUID
+    application_id: UUID
+    job_id: UUID | None = None
+    job_title: str = ""
+    company: str | None = None
+    state: str
+    browser_status: str
+
+
+class BrowserSessionRecoveryResponse(BaseModel):
+    """Outcome of reconciling sessions and (optionally) starting a new one."""
+
+    recovered: bool
+    session: BrowserSessionResponse | None = None
+    blocked_by: list[BrowserSessionBlocker] = Field(default_factory=list)
+    closed_session_ids: list[UUID] = Field(default_factory=list)
+    message: str
 
 
 class BrowserSessionCapabilitiesResponse(BaseModel):
@@ -109,10 +145,14 @@ class BrowserSessionCapabilitiesResponse(BaseModel):
 
 __all__ = [
     "ApplicationRedirectResponse",
+    "BrowserSessionBlocker",
     "BrowserSessionCapabilitiesResponse",
     "BrowserSessionListResponse",
+    "BrowserSessionRecoveryResponse",
     "BrowserSessionResponse",
     "BrowserViewInfo",
+    "ManualDestinationRequest",
     "PauseBrowserSessionRequest",
+    "RecoverBrowserSessionRequest",
     "StartBrowserSessionRequest",
 ]

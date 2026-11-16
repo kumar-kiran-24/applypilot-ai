@@ -330,7 +330,10 @@ async def test_real_e2e_application_never_submits_itself(
 
             filled = await client.post(
                 f"/api/v1/browser-sessions/by-application/{application.id}/fill",
-                json={"restart": False},
+                json={
+                    "approval_fingerprint": plan_body["approval_fingerprint"],
+                    "restart": False,
+                },
                 headers=headers,
             )
             assert filled.status_code == 200, filled.text

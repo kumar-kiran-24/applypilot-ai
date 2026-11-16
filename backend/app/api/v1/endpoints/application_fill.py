@@ -23,6 +23,7 @@ from app.models.user import User
 from app.schemas.application_fill import (
     FillExecutionResponse,
     FillPlanResponse,
+    ResumeFieldFillRequest,
     StartFieldFillRequest,
 )
 from app.schemas.browser_session import PauseBrowserSessionRequest
@@ -70,9 +71,11 @@ async def get_fill_plan(
     description=(
         "Types only verified profile or confirmed reusable answers into fields the "
         "planner marked ready, uploads the selected owned resume when supported, "
-        "and verifies every interaction. It never submits, accepts a legal "
-        "declaration, solves a CAPTCHA or enters a password/OTP/MFA code. Repeating "
-        "the call for the same analysis is idempotent."
+        "and verifies every interaction. The approval_fingerprint from the fill "
+        "plan must match the live form, page and proposed values or nothing is "
+        "filled. It never submits, accepts a legal declaration, solves a CAPTCHA "
+        "or enters a password/OTP/MFA code. Repeating the call for the same "
+        "analysis is idempotent."
     ),
     responses=ERROR_RESPONSES,
 )
@@ -83,7 +86,10 @@ async def start_field_fill(
     db: Database,
 ) -> FillExecutionResponse:
     return await ApplicationFieldFillService(db).start(
-        current_user, application_id, restart=payload.restart
+        current_user,
+        application_id,
+        approval_fingerprint=payload.approval_fingerprint,
+        restart=payload.restart,
     )
 
 
@@ -127,16 +133,23 @@ async def pause_field_fill(
     response_model=FillExecutionResponse,
     summary="Resume a paused field-fill run",
     description=(
-        "Continues only the fields that are still ready. If the page was analysed "
-        "again after the run was planned, a conflict is returned instead of typing "
-        "stale values into the new form."
+        "Continues only the fields that are still ready and still match the "
+        "approved plan. If the page, step, form structure or values changed, a "
+        "409 approval_stale error is returned instead of typing stale values."
     ),
     responses=ERROR_RESPONSES,
 )
 async def resume_field_fill(
-    application_id: ApplicationId, current_user: CurrentUser, db: Database
+    application_id: ApplicationId,
+    payload: ResumeFieldFillRequest,
+    current_user: CurrentUser,
+    db: Database,
 ) -> FillExecutionResponse:
-    return await ApplicationFieldFillService(db).resume(current_user, application_id)
+    return await ApplicationFieldFillService(db).resume(
+        current_user,
+        application_id,
+        approval_fingerprint=payload.approval_fingerprint,
+    )
 
 
 @router.post(

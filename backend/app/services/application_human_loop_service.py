@@ -60,6 +60,7 @@ from app.schemas.browser_session import BrowserViewInfo
 from app.services.application_field_fill_service import (
     FINAL_SUBMISSION_NOTE,
     ApplicationFieldFillService,
+    FieldFillConflictError,
     FieldFillNotFoundError,
 )
 from app.services.application_form_service import ApplicationFormService
@@ -398,7 +399,19 @@ class ApplicationHumanLoopService:
         execution = await self._execution_row(application.id, user.id)
         if execution is None:
             raise FieldFillNotFoundError()
-        result = await self.fill.resume(user, application.id)
+        # Resume is not a new approval: it continues the run the user already
+        # approved. The stored digest is re-verified by the fill service against
+        # the live page, so a changed form still forces a fresh review.
+        approved = (execution.summary or {}).get("approval_fingerprint")
+        if not approved:
+            raise FieldFillConflictError(
+                "This run predates the approval fingerprint. Review the current "
+                "fill plan and approve it before continuing.",
+                code="approval_required",
+            )
+        result = await self.fill.resume(
+            user, application.id, approval_fingerprint=str(approved)
+        )
         session_row = await self._maybe_session(user, application.id)
         await self._sync_from_execution(user, application, session_row, execution)
         if session_row is not None:

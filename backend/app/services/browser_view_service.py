@@ -205,8 +205,17 @@ class BrowserViewService:
                 self._active.pop(session_id, None)
 
     async def is_live(self, *, session_id: uuid.UUID, user_id: uuid.UUID) -> bool:
-        """True while the session is unexpired, alive and still owned by user."""
-        return await self._manager.get(session_id, user_id=user_id) is not None
+        """True while the session is unexpired, alive and still owned by user.
+
+        An attached live view is a user watching this browser, so it refreshes
+        the idle window on each check. Otherwise a session being viewed for
+        longer than the ~15 minute TTL was closed underneath the user, whose
+        next action reported it as expired.
+        """
+        if await self._manager.get(session_id, user_id=user_id) is None:
+            return False
+        await self._manager.touch(session_id, user_id=user_id)
+        return True
 
     def active_views(self) -> int:
         return len(self._active)

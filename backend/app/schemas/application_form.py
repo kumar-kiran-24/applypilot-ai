@@ -91,6 +91,10 @@ class FieldSourceMatch(BaseModel):
 
 class DetectedFormField(BaseModel):
     field_id: str
+    #: Phase 2J.3: questionnaire key this control maps to, when known. It links
+    #: a confirmed ``ApplicationQuestion`` to the live control instead of
+    #: keeping two independent field models.
+    question_key: str | None = None
     form_index: int
     label: str
     field_type: FormFieldType

@@ -64,6 +64,9 @@ class FieldActionResult:
     field_id: str
     observed_value: str | None = None
     reason: str = ""
+    #: Set when the control no longer matches what the approved plan described,
+    #: so the field must go back to the user instead of being filled.
+    requires_review: bool = False
 
 
 class FieldActionError(RuntimeError):

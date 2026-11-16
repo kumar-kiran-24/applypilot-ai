@@ -14,6 +14,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from app.schemas.application_field import ApplicationField
+
 
 class FillFieldStatus(str, Enum):
     """Where a field stands in the plan or in a run."""
@@ -51,29 +53,36 @@ class FillResumeSelection(BaseModel):
     reason: str = ""
 
 
-class FillPlanField(BaseModel):
-    field_id: str
-    label: str
-    field_type: str
-    classification: str
-    required: bool
-    action: FillAction
-    status: FillFieldStatus
-    proposed_value: str | None = None
-    source: str = "none"
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
-    options: list[str] = Field(default_factory=list)
+class FillPlanField(ApplicationField):
+    """A canonical application field plus the planner's decision for it.
+
+The preview serializes this exact shape, so the row a user approves is the
+row the execution engine will act on; no separate preview model exists.
+"""
+
+    action: FillAction = FillAction.NONE
+    status: FillFieldStatus = FillFieldStatus.SKIPPED
     reason: str = ""
 
 
 class FillPlanResponse(BaseModel):
-    """A preview of exactly what would be filled, and what never will be."""
+    """A preview of exactly what would be filled, and what never will be.
+
+    ``approval_fingerprint`` is the digest of this preview. Starting or resuming
+    a run must echo it; the backend recomputes the digest from the live form and
+    refuses to fill when anything material changed.
+    """
 
     application_id: UUID
     analysis_id: UUID
     analysis_version: int
     browser_session_id: UUID
     generated_at: datetime
+    page_url: str | None = None
+    application_step: str | None = None
+    analyzed_at: datetime | None = None
+    structure_fingerprint: str = ""
+    approval_fingerprint: str = ""
     total_fields: int
     eligible_count: int
     confirmation_count: int
@@ -91,9 +100,20 @@ class FillPlanResponse(BaseModel):
 
 
 class StartFieldFillRequest(BaseModel):
-    """Start a fill run; ``restart`` explicitly starts a new run."""
+    """Start a fill run for the plan the user approved.
 
+    ``approval_fingerprint`` must equal the fingerprint of the current plan; a
+    mismatch is rejected instead of typing values the user did not review.
+    """
+
+    approval_fingerprint: str = Field(min_length=32, max_length=64)
     restart: bool = False
+
+
+class ResumeFieldFillRequest(BaseModel):
+    """Resume a paused run only while the approved plan is still current."""
+
+    approval_fingerprint: str = Field(min_length=32, max_length=64)
 
 
 class FillFieldResult(BaseModel):
@@ -116,6 +136,7 @@ class FillExecutionResponse(BaseModel):
     browser_session_id: UUID
     run_number: int
     status: str
+    approval_fingerprint: str | None = None
     total_fields: int
     ready_count: int
     succeeded_count: int
@@ -152,5 +173,6 @@ __all__ = [
     "FillPlanField",
     "FillPlanResponse",
     "FillResumeSelection",
+    "ResumeFieldFillRequest",
     "StartFieldFillRequest",
 ]

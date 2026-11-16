@@ -78,6 +78,18 @@ class BrowserSessionManager:
     clock: Callable[[], float] = field(default=time.monotonic)
     _sessions: dict[uuid.UUID, LiveBrowserSession] = field(default_factory=dict)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    #: One lifecycle lock per application. It serialises two concurrent starts
+    #: inside this process so the row is created once and only one browser is
+    #: launched; the database unique constraint still guards other workers.
+    _application_locks: dict[uuid.UUID, asyncio.Lock] = field(default_factory=dict)
+
+    def application_lock(self, application_id: uuid.UUID) -> asyncio.Lock:
+        """Return the per-application start lock (created on first use)."""
+        lock = self._application_locks.get(application_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._application_locks[application_id] = lock
+        return lock
 
     async def acquire(
         self,
