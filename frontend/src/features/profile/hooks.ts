@@ -21,12 +21,14 @@ import {
   updatePreferences,
   updateProfile,
   updateProject,
+  upsertReusableAnswer,
   type CertificationInput,
   type EducationInput,
   type ExperienceInput,
   type PreferencesInput,
   type ProfileInput,
   type ProjectInput,
+  type ReusableAnswerInput,
 } from "@/features/profile/api";
 import type {
   ApplicationAnswer,
@@ -38,6 +40,7 @@ import type {
   JobPreference,
   ProfileCompleteness,
   ProjectEntry,
+  SavedAnswer,
 } from "@/types/api";
 
 async function invalidateProfile(queryClient: ReturnType<typeof useQueryClient>) {
@@ -65,6 +68,23 @@ export function useReusableAnswers() {
     queryKey: profileKeys.answers,
     queryFn: fetchReusableAnswers,
     retry: false,
+  });
+}
+
+export function useUpsertReusableAnswer() {
+  const queryClient = useQueryClient();
+  return useMutation<
+    SavedAnswer,
+    Error,
+    { key: string; input: ReusableAnswerInput }
+  >({
+    mutationFn: ({ key, input }) => upsertReusableAnswer(key, input),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: profileKeys.answers });
+      await queryClient.invalidateQueries({ queryKey: profileKeys.detail });
+      // The answer library derives categories and trust from the same store.
+      await queryClient.invalidateQueries({ queryKey: ["answers"] });
+    },
   });
 }
 
@@ -217,6 +237,8 @@ export function useDeleteReusableAnswer() {
     mutationFn: deleteReusableAnswer,
     onSuccess: async () => {
       await invalidateProfile(queryClient);
+      // The answer library derives categories and trust from the same store.
+      await queryClient.invalidateQueries({ queryKey: ["answers"] });
     },
   });
 }

@@ -47,6 +47,12 @@ function JobListSkeleton() {
 export function GlassdoorDiscovery({
   defaultDays = 30,
   defaultMaxMessages = 25,
+  showJobList = true,
+}: {
+  defaultDays?: number;
+  defaultMaxMessages?: number;
+  /** The job library owns the list on `/jobs`; the scan controls stay here. */
+  showJobList?: boolean;
 }) {
   const status = useGmailStatus();
   const connect = useConnectGmail();
@@ -258,7 +264,7 @@ export function GlassdoorDiscovery({
           </Alert>
         ) : null}
 
-        {jobs.isPending ? (
+        {showJobList && (jobs.isPending ? (
           <JobListSkeleton />
         ) : jobs.isError ? (
           <>
@@ -360,7 +366,7 @@ export function GlassdoorDiscovery({
               )
             }
           />
-        )}
+        ))}
       </CardContent>
     </Card>
   );

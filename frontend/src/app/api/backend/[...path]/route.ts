@@ -18,6 +18,30 @@ type RouteContext = { params: Promise<{ path: string[] }> };
 const RESUME_UPLOAD_PATH = "resumes/upload";
 
 /**
+ * Routes that drive Playwright against the employer's live page.
+ *
+ * Navigating, evaluating and typing into a real ATS form is far slower than a
+ * database read: a plan on a small page already takes ~8s, and a multi-field
+ * fill easily exceeds the 30s default. Timing those out reported a healthy
+ * backend as "could not be reached" and threw away completed work.
+ */
+const LIVE_BROWSER_PATH =
+  /^browser-sessions\/by-application\/[0-9a-fA-F-]{36}\/(detect-destination|destination|recover|form-analysis|fill-plan|fill)$/;
+
+const LIVE_BROWSER_TIMEOUT_MS = 150_000;
+
+function isTimeout(error: unknown): boolean {
+  // `fetch` aborts with an AbortError (DOMException) in both the Node and Edge
+  // runtimes; undici may surface it as a TimeoutError.
+  return (
+    error instanceof Error &&
+    (error.name === "AbortError" ||
+      error.name === "TimeoutError" ||
+      error.message === "This operation was aborted")
+  );
+}
+
+/**
  * Attach the HttpOnly session token server-side and forward the request.
  *
  * Only the routes this frontend actually uses are forwarded: an open proxy
@@ -33,7 +57,18 @@ async function handle(
 
   const route = matchProxyRoute(method, path);
   if (!route) {
-    return NextResponse.json({ detail: "Not found." }, { status: 404 });
+    // Distinct from a backend 404: this request never left the app. The message
+    // says so, without disclosing the allow-list, so a stale client build or a
+    // missing proxy entry is not mistaken for a deleted resource.
+    return NextResponse.json(
+      {
+        detail:
+          "This action is not available through the ApplyPilot API proxy. "
+          + "Reload the app, and update it if the problem continues.",
+        code: "proxy_route_not_allowed",
+      },
+      { status: 404 },
+    );
   }
 
   if (method !== "GET" && !isSameOrigin(request)) {
@@ -63,11 +98,18 @@ async function handle(
   const isUpload = path === RESUME_UPLOAD_PATH;
   const isGmailScan =
     path === "gmail/glassdoor/jobs" || path === "jobs/discover";
+  const isLiveBrowser = LIVE_BROWSER_PATH.test(path);
   const options: BackendFetchOptions = {
     token,
     method: method as NonNullable<BackendFetchOptions["method"]>,
     query: query.size > 0 ? query : undefined,
-    timeoutMs: isUpload ? 60_000 : isGmailScan ? GLASSDOOR_TIMEOUT_MS : 30_000,
+    timeoutMs: isUpload
+      ? 60_000
+      : isGmailScan
+        ? GLASSDOOR_TIMEOUT_MS
+        : isLiveBrowser
+          ? LIVE_BROWSER_TIMEOUT_MS
+          : 30_000,
   };
 
   if (isUpload) {
@@ -95,15 +137,43 @@ async function handle(
     }
   }
 
+  const startedAt = Date.now();
   let upstream: Response;
   try {
     upstream = await backendFetch(path, options);
-  } catch {
+  } catch (error) {
+    // A timeout means the API answered too slowly; an unreachable API means the
+    // connection never worked. Reporting both as "could not be reached" sent
+    // users to restart a backend that was healthy all along.
+    const reason = isTimeout(error)
+      ? "timeout"
+      : error instanceof Error
+        ? error.name
+        : "unknown";
+    // Server-side evidence for the exact request that failed. Never the token,
+    // a body or employer page content.
+    console.warn(
+      `[bff] ${method} ${path} failed after ${Date.now() - startedAt}ms (${reason})`,
+    );
+    if (isTimeout(error)) {
+      return NextResponse.json(
+        {
+          detail: isLiveBrowser
+            ? "The ApplyPilot API did not respond in time while working on the "
+              + "employer's page. The action may have partially completed: check "
+              + "the form and the session state before retrying."
+            : "The ApplyPilot API did not respond in time. Please try again.",
+          code: "backend_timeout",
+        },
+        { status: 504 },
+      );
+    }
     return NextResponse.json(
       {
         detail: isGmailScan
           ? "Job discovery timed out while contacting Gmail. Please try again."
-          : "The ApplyPilot API could not be reached.",
+          : "The ApplyPilot API could not be reached. Start the backend "
+            + "(python -m scripts.run_server from backend/) and try again.",
         code: "backend_unreachable",
       },
       { status: 504 },

@@ -4,17 +4,22 @@ import type {
   BulkMatchRequest,
   BulkMatchResponse,
   DiscoverJobsResponse,
+  ImportJobResponse,
+  Job,
   JobIntelligenceResponse,
-  JobMatchesResponse,
+  JobListQuery,
   JobListResponse,
+  JobMatchesResponse,
   MatchingSummary,
   ResumeComparisonResponse,
 } from "@/types/api";
 
 export const jobKeys = {
   all: ["jobs"] as const,
-  list: (limit: number, offset: number) =>
-    ["jobs", "list", limit, offset] as const,
+  list: (query: JobListQuery = {}) => ["jobs", "list", query] as const,
+  saved: (limit: number, offset: number) =>
+    ["jobs", "saved", limit, offset] as const,
+  detail: (jobId: string) => ["jobs", "detail", jobId] as const,
   matches: (jobId: string) => ["jobs", "matches", jobId] as const,
   intelligence: (jobId: string) => ["jobs", "intelligence", jobId] as const,
   comparison: (jobId: string) => ["jobs", "comparison", jobId] as const,
@@ -23,11 +28,62 @@ export const jobKeys = {
   summary: ["matching", "summary"] as const,
 };
 
-export function fetchJobs(
+/** Serialise only the filters the backend accepts, dropping empty values. */
+function queryString(query: JobListQuery): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === null || value === "") continue;
+    params.set(key, String(value));
+  }
+  const serialised = params.toString();
+  return serialised ? `?${serialised}` : "";
+}
+
+/**
+ * Imports a Glassdoor job URL the user pasted. The backend validates the host,
+ * checks DNS and either creates or reuses the posting; it never fetches it.
+ */
+export function importJob(url: string): Promise<ImportJobResponse> {
+  return apiFetch<ImportJobResponse>("jobs/import", {
+    method: "POST",
+    body: { url },
+    timeoutMs: 60_000,
+  });
+}
+
+/** Lists the user's stored jobs with search, filters, sorting and paging. */
+export function fetchJobs(query: JobListQuery = {}): Promise<JobListResponse> {
+  return apiFetch<JobListResponse>(`jobs${queryString(query)}`);
+}
+
+/** Reads the jobs the user explicitly saved, most recently saved first. */
+export function fetchSavedJobs(
   limit = 50,
   offset = 0,
 ): Promise<JobListResponse> {
-  return apiFetch<JobListResponse>(`jobs?limit=${limit}&offset=${offset}`);
+  return apiFetch<JobListResponse>(`jobs/saved?limit=${limit}&offset=${offset}`);
+}
+
+/** One owned posting, including its per-user saved/dismissed state. */
+export function fetchJob(jobId: string): Promise<Job> {
+  return apiFetch<Job>(`jobs/${jobId}`);
+}
+
+/** Persists the saved flag; saving also clears a dismissal. Idempotent. */
+export function setJobSaved(jobId: string, saved: boolean): Promise<Job> {
+  return apiFetch<Job>(`jobs/${jobId}/save`, {
+    method: saved ? "POST" : "DELETE",
+  });
+}
+
+/** Hides a posting from the default list; nothing is deleted. Idempotent. */
+export function dismissJob(jobId: string): Promise<Job> {
+  return apiFetch<Job>(`jobs/${jobId}/dismiss`, { method: "POST" });
+}
+
+/** Returns a dismissed posting to the default list without saving it. */
+export function restoreJob(jobId: string): Promise<Job> {
+  return apiFetch<Job>(`jobs/${jobId}/restore`, { method: "POST" });
 }
 
 /** Runs the read-only Gmail scan and stores the postings for matching. */

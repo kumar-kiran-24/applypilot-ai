@@ -76,6 +76,40 @@ const EXECUTION_STATUS: Record<string, { label: string; variant: BadgeVariant }>
   failed: { label: "Failed", variant: "danger" },
 };
 
+/**
+ * Vocabulary for where a proposed value comes from. The plan reports only
+ * these known sources; an unknown value is shown verbatim rather than guessed.
+ */
+const SOURCE_LABEL: Record<string, string> = {
+  verified_profile: "Verified profile",
+  confirmed_reusable_answer: "Confirmed answer",
+  user_provided: "Approved for this application",
+  resume_suggestion: "Resume suggestion",
+  ai_suggestion: "AI draft",
+  none: "No source",
+};
+
+function sourceLabel(source: string): string {
+  return SOURCE_LABEL[source] ?? source.replaceAll("_", " ");
+}
+
+const VERIFICATION: Record<
+  string,
+  { label: string; variant: BadgeVariant }
+> = {
+  verified: { label: "Verified", variant: "success" },
+  derived: { label: "Derived · confirm", variant: "warning" },
+  unverified: { label: "No verified source", variant: "neutral" },
+};
+
+const SENSITIVITY: Record<string, string> = {
+  sensitive: "Sensitive · manual",
+  legal: "Legal · manual",
+  credential: "Credential · never automated",
+  verification: "Verification · never automated",
+  demographic: "Optional · manual",
+};
+
 function FieldRow({
   field,
   resultStatus,
@@ -86,24 +120,78 @@ function FieldRow({
   verified?: boolean;
 }) {
   const meta = FIELD_STATUS[resultStatus ?? field.status];
+  const verification: { label: string; variant: BadgeVariant } =
+    VERIFICATION[field.verification_status] ?? {
+      label: "No verified source",
+      variant: "neutral",
+    };
+  const sensitivity = SENSITIVITY[field.sensitivity];
   return (
-    <div className="rounded-xl border border-white/[0.07] bg-white/[0.02] p-3">
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <div className="min-w-0">
-          <p className="truncate text-[12px] font-medium text-ink">
-            {field.label}
-            {field.required ? (
-              <span className="ml-1 text-amber-300" aria-label="required">
-                *
-              </span>
-            ) : null}
+    <tr className="border-t border-white/[0.06] align-top">
+      <td className="px-3 py-2.5">
+        <p className="text-[12px] font-medium text-ink">
+          {field.label}
+          {field.required ? (
+            <span className="ml-1 text-amber-300" aria-label="required">
+              *
+            </span>
+          ) : null}
+        </p>
+        <p className="mt-0.5 text-[11px] text-ink-subtle">
+          {field.classification.replaceAll("_", " ")} · {field.input_type} ·{" "}
+          {field.action}
+        </p>
+        <span className="mt-1 flex flex-wrap items-center gap-1">
+          <Badge variant={verification.variant}>{verification.label}</Badge>
+          {sensitivity ? (
+            <Badge variant="warning">{sensitivity}</Badge>
+          ) : null}
+          {field.conflicting ? (
+            <Badge variant="danger">Conflicting answers</Badge>
+          ) : null}
+          {field.duplicate_of ? (
+            <Badge variant="neutral">Duplicate control</Badge>
+          ) : null}
+        </span>
+        {field.already_populated && field.current_value ? (
+          <p className="mt-1 break-words text-[11px] text-ink-subtle">
+            Current: {field.current_value} · kept as-is
           </p>
-          <p className="mt-0.5 text-[11px] text-ink-subtle">
-            {field.classification.replaceAll("_", " ")} · {field.action}
-            {field.proposed_value ? " · value prepared" : ""}
+        ) : null}
+        {field.reason ? (
+          <p className="mt-1 text-[11px] leading-relaxed text-ink-subtle">
+            {field.reason}
           </p>
-        </div>
-        <div className="flex shrink-0 items-center gap-1.5">
+        ) : null}
+      </td>
+      <td className="max-w-[16rem] px-3 py-2.5">
+        {field.proposed_value ? (
+          <span className="break-words text-[12px] text-ink-muted">
+            {field.proposed_value}
+          </span>
+        ) : field.already_populated ? (
+          <span className="text-[11px] text-ink-subtle">Not changed</span>
+        ) : (
+          <span className="text-[11px] text-ink-subtle">Not available</span>
+        )}
+      </td>
+      <td className="px-3 py-2.5">
+        <span className="whitespace-nowrap text-[11px] text-ink-subtle">
+          {sourceLabel(field.source)}
+        </span>
+        {field.provenance.explanation ? (
+          <p className="mt-1 max-w-[14rem] text-[10px] leading-relaxed text-ink-subtle">
+            {field.provenance.explanation}
+          </p>
+        ) : null}
+        {field.provenance.stale ? (
+          <p className="mt-1 text-[10px] text-amber-200">
+            Stored value needs re-confirmation
+          </p>
+        ) : null}
+      </td>
+      <td className="px-3 py-2.5">
+        <span className="inline-flex items-center gap-1.5">
           {verified ? (
             <CheckCircle2
               aria-hidden="true"
@@ -111,19 +199,9 @@ function FieldRow({
             />
           ) : null}
           <Badge variant={meta.variant}>{meta.label}</Badge>
-        </div>
-      </div>
-      {field.status === "ready" && field.proposed_value ? (
-        <p className="mt-2 truncate rounded-lg bg-navy-950/50 px-2 py-1 text-[11px] text-ink-muted">
-          {field.proposed_value}
-        </p>
-      ) : null}
-      {field.reason ? (
-        <p className="mt-2 text-[11px] leading-relaxed text-ink-subtle">
-          {field.reason}
-        </p>
-      ) : null}
-    </div>
+        </span>
+      </td>
+    </tr>
   );
 }
 
@@ -293,6 +371,19 @@ export function ApplicationFillPanel({
             </div>
 
             <div className="rounded-xl border border-white/[0.07] bg-white/[0.02] p-3">
+              <p className="text-[11px] text-ink-muted">
+                Live page: {data.page_url ?? "unknown"}
+                {data.application_step
+                  ? ` · step: ${data.application_step}`
+                  : ""}
+              </p>
+              <p className="mt-1 break-all text-[10px] text-ink-subtle">
+                Analysis v{data.analysis_version} · plan fingerprint{" "}
+                {data.approval_fingerprint.slice(0, 16)}…
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-white/[0.07] bg-white/[0.02] p-3">
               <div className="flex items-center gap-2">
                 <FileText aria-hidden="true" className="h-3.5 w-3.5 text-sky-300" />
                 <p className="text-[12px] font-medium text-ink">Selected resume</p>
@@ -351,11 +442,17 @@ export function ApplicationFillPanel({
             <div className="flex flex-wrap gap-2">
               <Button
                 size="sm"
-                onClick={() => startFill.mutate(false)}
-                disabled={busy || !data.executable}
+                onClick={() =>
+                  startFill.mutate({
+                    approvalFingerprint: data.approval_fingerprint,
+                  })
+                }
+                disabled={
+                  busy || !data.executable || !data.approval_fingerprint
+                }
               >
                 {startFill.isPending ? <Spinner /> : <Play className="h-3.5 w-3.5" />}
-                Fill safe fields
+                Approve &amp; fill these fields
               </Button>
               {run?.can_pause ? (
                 <Button
@@ -372,7 +469,9 @@ export function ApplicationFillPanel({
                 <Button
                   variant="secondary"
                   size="sm"
-                  onClick={() => resumeFill.mutate()}
+                  onClick={() =>
+                    resumeFill.mutate(data.approval_fingerprint)
+                  }
                   disabled={busy}
                 >
                   <Play className="h-3.5 w-3.5" />
@@ -401,18 +500,53 @@ export function ApplicationFillPanel({
               </Button>
             </div>
 
-            <div className="space-y-2">
-              {data.fields.map((field) => {
-                const result = resultByField.get(field.field_id);
-                return (
-                  <FieldRow
-                    key={field.field_id}
-                    field={field}
-                    resultStatus={result?.status}
-                    verified={result?.verified}
-                  />
-                );
-              })}
+            <div className="space-y-1.5">
+              <p className="text-[11px] uppercase tracking-[0.1em] text-ink-subtle">
+                Fill preview
+              </p>
+              <p className="text-[11px] text-ink-subtle">
+                Every row is the backend fill plan for the live page above, not
+                a separate questionnaire. Only rows marked Ready are filled
+                without asking. Approving sends this plan&apos;s fingerprint;
+                if the page, step, structure or any value changed, ApplyPilot
+                refuses to fill and asks you to review again.
+              </p>
+              <div className="overflow-x-auto rounded-xl border border-white/[0.07] bg-white/[0.02]">
+                <table className="min-w-[36rem] w-full text-left">
+                  <caption className="sr-only">
+                    Proposed field values with their source and fill status
+                  </caption>
+                  <thead>
+                    <tr className="text-[10px] uppercase tracking-[0.08em] text-ink-subtle">
+                      <th scope="col" className="px-3 py-2 font-medium">
+                        Field
+                      </th>
+                      <th scope="col" className="px-3 py-2 font-medium">
+                        Proposed value
+                      </th>
+                      <th scope="col" className="px-3 py-2 font-medium">
+                        Source
+                      </th>
+                      <th scope="col" className="px-3 py-2 font-medium">
+                        Status
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.fields.map((field) => {
+                      const result = resultByField.get(field.field_id);
+                      return (
+                        <FieldRow
+                          key={field.field_id}
+                          field={field}
+                          resultStatus={result?.status}
+                          verified={result?.verified}
+                        />
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             </div>
 
             <div className="flex items-start gap-2 rounded-xl border border-white/[0.07] bg-white/[0.02] p-3">

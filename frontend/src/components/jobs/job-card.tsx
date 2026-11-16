@@ -2,13 +2,18 @@
 
 import {
   ArrowUpRight,
+  Bookmark,
+  BookmarkCheck,
   Building2,
   CalendarDays,
   ChevronDown,
+  EyeOff,
   FilePlus2,
   MapPin,
+  RotateCcw,
   Sparkles,
 } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
@@ -19,6 +24,12 @@ import { Badge } from "@/components/ui/badge";
 import { buttonClasses } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { useAnalyzeApplication } from "@/features/applications/hooks";
+import {
+  useDismissJob,
+  useRestoreJob,
+  useSaveJob,
+  useUnsaveJob,
+} from "@/features/jobs/hooks";
 import { describeError } from "@/lib/api/errors";
 import { cn } from "@/lib/utils/cn";
 import { formatDate } from "@/lib/utils/format";
@@ -37,9 +48,19 @@ export function JobCard({ job }: { job: Job }) {
   const url = safeExternalUrl(job.job_url);
   const router = useRouter();
   const analyze = useAnalyzeApplication();
+  const save = useSaveJob();
+  const unsave = useUnsaveJob();
+  const dismiss = useDismissJob();
+  const restore = useRestoreJob();
   const [open, setOpen] = useState(false);
   const required = job.requirements.required_skills;
   const best = job.best_match;
+  const saved = job.user_state.saved;
+  const dismissed = job.user_state.dismissed;
+  const stateError =
+    save.error ?? unsave.error ?? dismiss.error ?? restore.error ?? null;
+  const statePending =
+    save.isPending || unsave.isPending || dismiss.isPending || restore.isPending;
 
   const prepare = () => {
     analyze.mutate(
@@ -57,18 +78,12 @@ export function JobCard({ job }: { job: Job }) {
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold leading-snug text-ink">
-            {url ? (
-              <a
-                href={url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="hover:text-sky-300 focus-visible:underline"
-              >
-                {job.job_title}
-              </a>
-            ) : (
-              job.job_title
-            )}
+            <Link
+              href={`/jobs/${job.id}`}
+              className="hover:text-sky-300 focus-visible:underline"
+            >
+              {job.job_title}
+            </Link>
           </h3>
           <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-ink-muted">
             <span className="inline-flex items-center gap-1.5">
@@ -95,17 +110,26 @@ export function JobCard({ job }: { job: Job }) {
           </div>
         </div>
 
-        {url ? (
-          <a
-            href={url}
-            target="_blank"
-            rel="noopener noreferrer"
-            aria-label={`Open ${job.job_title} on Glassdoor`}
-            className="shrink-0 rounded-lg border border-white/10 bg-white/[0.03] p-1.5 text-ink-muted transition-colors hover:border-white/20 hover:text-ink"
-          >
-            <ArrowUpRight aria-hidden="true" className="h-3.5 w-3.5" />
-          </a>
-        ) : null}
+        <div className="flex shrink-0 items-center gap-2">
+          {saved ? (
+            <Badge variant="success">
+              <BookmarkCheck aria-hidden="true" className="h-3 w-3" />
+              Saved
+            </Badge>
+          ) : null}
+          {dismissed ? <Badge variant="warning">Dismissed</Badge> : null}
+          {url ? (
+            <a
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label={`Open ${job.job_title} on Glassdoor`}
+              className="shrink-0 rounded-lg border border-white/10 bg-white/[0.03] p-1.5 text-ink-muted transition-colors hover:border-white/20 hover:text-ink"
+            >
+              <ArrowUpRight aria-hidden="true" className="h-3.5 w-3.5" />
+            </a>
+          ) : null}
+        </div>
       </div>
 
       {best ? (
@@ -182,12 +206,67 @@ export function JobCard({ job }: { job: Job }) {
             </>
           )}
         </button>
+        <button
+          type="button"
+          onClick={() => {
+            if (saved) {
+              unsave.mutate(job.id);
+            } else {
+              save.mutate(job.id);
+            }
+          }}
+          disabled={statePending}
+          aria-pressed={saved}
+          className={buttonClasses({
+            variant: "ghost",
+            size: "sm",
+            className: "text-[12px]",
+          })}
+        >
+          {saved ? (
+            <BookmarkCheck aria-hidden="true" className="h-3.5 w-3.5" />
+          ) : (
+            <Bookmark aria-hidden="true" className="h-3.5 w-3.5" />
+          )}
+          {saved ? "Saved" : "Save"}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            if (dismissed) {
+              restore.mutate(job.id);
+            } else {
+              dismiss.mutate(job.id);
+            }
+          }}
+          disabled={statePending}
+          className={buttonClasses({
+            variant: "ghost",
+            size: "sm",
+            className: "text-[12px]",
+          })}
+        >
+          {dismissed ? (
+            <RotateCcw aria-hidden="true" className="h-3.5 w-3.5" />
+          ) : (
+            <EyeOff aria-hidden="true" className="h-3.5 w-3.5" />
+          )}
+          {dismissed ? "Restore" : "Dismiss"}
+        </button>
       </div>
 
       {analyze.error ? (
         <div className="mt-3">
           <Alert variant="danger" title="Could not prepare this application">
             {describeError(analyze.error)}
+          </Alert>
+        </div>
+      ) : null}
+
+      {stateError ? (
+        <div className="mt-3">
+          <Alert variant="danger" title="Could not update this recommendation">
+            {describeError(stateError)}
           </Alert>
         </div>
       ) : null}

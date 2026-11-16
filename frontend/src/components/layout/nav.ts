@@ -1,4 +1,5 @@
 import {
+  BookOpen,
   Briefcase,
   ClipboardList,
   FileText,
@@ -56,6 +57,12 @@ export const NAV_ITEMS: NavItem[] = [
     label: "Candidate Profile",
     href: "/profile",
     icon: UserRound,
+    available: true,
+  },
+  {
+    label: "Answer Library",
+    href: "/answers",
+    icon: BookOpen,
     available: true,
   },
   { label: "Gmail Integration", href: "/gmail", icon: Mail, available: true },

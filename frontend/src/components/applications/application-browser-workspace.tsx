@@ -37,6 +37,7 @@ import {
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { ApplicationRedirectPanel } from "@/components/applications/application-redirect-panel";
 import { EmployerApplicationUrlForm } from "@/components/applications/employer-application-url-form";
 import {
   useBrowserCapabilities,
@@ -49,6 +50,7 @@ import {
   usePauseBrowserSession,
   usePauseFieldFill,
   useReanalyzeHumanLoop,
+  useRecoverBrowserSession,
   useResumeBrowserSession,
   useResumeHumanLoop,
   useStartBrowserSession,
@@ -58,11 +60,15 @@ import {
   fillKeys,
   humanLoopKeys,
 } from "@/features/applications/api";
-import { describeError } from "@/lib/api/errors";
+import { ApiError, describeError } from "@/lib/api/errors";
 import { apiBaseUrl } from "@/lib/constants";
 import { cn } from "@/lib/utils/cn";
 import { safeExternalUrl } from "@/lib/utils/url";
-import type { BrowserViewInfo } from "@/types/api";
+import type {
+  BrowserSession,
+  BrowserSessionRecoveryResponse,
+  BrowserViewInfo,
+} from "@/types/api";
 
 type ViewState = "idle" | "connecting" | "live" | "closed" | "error";
 
@@ -190,6 +196,7 @@ export function ApplicationBrowserWorkspace({
   const cancelSession = useCancelBrowserSession(applicationId);
   const pauseSession = usePauseBrowserSession(applicationId);
   const resumeSession = useResumeBrowserSession(applicationId);
+  const recoverSession = useRecoverBrowserSession(applicationId);
   const execution = useFillExecution(applicationId);
   const interventions = useInterventions(applicationId);
   const review = useFinalReview(applicationId);
@@ -205,6 +212,9 @@ export function ApplicationBrowserWorkspace({
   const [inputNotice, setInputNotice] = useState<string | null>(null);
   const [diagnostic, setDiagnostic] = useState<ViewDiagnostic | null>(null);
   const [endConfirm, setEndConfirm] = useState(false);
+  const [recovery, setRecovery] =
+    useState<BrowserSessionRecoveryResponse | null>(null);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
 
   const socketRef = useRef<WebSocket | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
@@ -470,11 +480,76 @@ export function ApplicationBrowserWorkspace({
     };
   };
 
+  /** Attach the live view to a session the backend says is genuinely open. */
+  const attachToSession = async (current: BrowserSession) => {
+    // A paused browser is still live and viewable; only a closed/expired
+    // session cannot be attached.
+    if (current.browser_status !== "open") {
+      setViewState("error");
+      setDiagnostic({
+        title: "No live browser is attached to this application",
+        detail:
+          current.failure_reason ??
+          "The browser session is not open. Start it again, then reopen the live view.",
+      });
+      return;
+    }
+
+    let issued: Awaited<ReturnType<typeof ticket.mutateAsync>>;
+    try {
+      issued = await ticket.mutateAsync();
+    } catch (cause) {
+      setViewState("error");
+      setDiagnostic({
+        title: "The live-view ticket could not be issued",
+        detail: describeError(cause),
+      });
+      return;
+    }
+    connectSocket(issued.websocket_path, issued.ticket);
+  };
+
+  /**
+   * Reconcile stale rows and start this application's browser.
+   *
+   * Without `force` the backend never ends a genuinely live session on another
+   * application; it returns it so the user can decide. That decision is what
+   * the recovery panel asks for explicitly.
+   */
+  const recoverAndAttach = async (force: boolean) => {
+    setRecovery(null);
+    setRecoveryError(null);
+    setOpen(true);
+    setInputNotice(null);
+    setNotice(null);
+    setDiagnostic(null);
+    setEndConfirm(false);
+    setViewState("connecting");
+    try {
+      const outcome = await recoverSession.mutateAsync(force);
+      if (outcome.session) {
+        await attachToSession(outcome.session);
+        return;
+      }
+      setRecovery(outcome);
+      setViewState("idle");
+    } catch (cause) {
+      setRecoveryError(describeError(cause));
+      setViewState("error");
+      setDiagnostic({
+        title: "The browser session could not be recovered",
+        detail: describeError(cause),
+      });
+    }
+  };
+
   const openWorkspace = async () => {
     setOpen(true);
     setInputNotice(null);
     setNotice(null);
     setDiagnostic(null);
+    setRecovery(null);
+    setRecoveryError(null);
     setEndConfirm(false);
 
     // Saving the employer URL can retry immediately, before the capability
@@ -502,6 +577,18 @@ export function ApplicationBrowserWorkspace({
       // Idempotent: returns the existing live browser or opens the page once.
       current = await startSession.mutateAsync();
     } catch (cause) {
+      const code = cause instanceof ApiError ? cause.code : undefined;
+      if (
+        code === "browser_session_limit_reached" ||
+        code === "browser_session_conflict" ||
+        code === "browser_session_already_open"
+      ) {
+        // A row can look "open" after its browser died. Recovery reconciles
+        // that first; a genuinely live session on another application is
+        // surfaced instead of being ended silently.
+        await recoverAndAttach(false);
+        return;
+      }
       setViewState("error");
       setDiagnostic({
         title: "The browser session could not be started",
@@ -510,31 +597,7 @@ export function ApplicationBrowserWorkspace({
       return;
     }
 
-    // A paused browser is still live and viewable; only a closed/expired
-    // session cannot be attached.
-    if (current.browser_status !== "open") {
-      setViewState("error");
-      setDiagnostic({
-        title: "No live browser is attached to this application",
-        detail:
-          current.failure_reason ??
-          "The browser session is not open. Start it again, then reopen the live view.",
-      });
-      return;
-    }
-
-    let issued: Awaited<ReturnType<typeof ticket.mutateAsync>>;
-    try {
-      issued = await ticket.mutateAsync();
-    } catch (cause) {
-      setViewState("error");
-      setDiagnostic({
-        title: "The live-view ticket could not be issued",
-        detail: describeError(cause),
-      });
-      return;
-    }
-    connectSocket(issued.websocket_path, issued.ticket);
+    await attachToSession(current);
   };
 
   const imagePoint = (event: {
@@ -645,29 +708,91 @@ export function ApplicationBrowserWorkspace({
           </Alert>
         ) : null}
 
+        {recoveryError ? (
+          <Alert variant="danger" title="Browser recovery failed">
+            {recoveryError}
+          </Alert>
+        ) : null}
+
+        {recovery && !recovery.recovered ? (
+          <Alert
+            variant="warning"
+            title="Another application has the live browser"
+          >
+            <p>{recovery.message}</p>
+            {recovery.blocked_by.length > 0 ? (
+              <ul className="mt-2 space-y-1 text-[11px]">
+                {recovery.blocked_by.map((blocker) => (
+                  <li key={blocker.session_id}>
+                    <span className="font-medium text-ink">
+                      {blocker.job_title || "Untitled application"}
+                    </span>
+                    {blocker.company ? ` · ${blocker.company}` : ""}{" "}
+                    <span className="text-ink-subtle">
+                      ({blocker.browser_status})
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={recoverSession.isPending}
+                onClick={() => void recoverAndAttach(true)}
+              >
+                {recoverSession.isPending ? <Spinner /> : null}
+                End that session and continue
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setRecovery(null)}
+              >
+                Not now
+              </Button>
+            </div>
+            <p className="mt-2 text-[11px] text-ink-subtle">
+              Ending it closes that browser only. Its answers stay stored; the
+              other application can be reopened later.
+            </p>
+          </Alert>
+        ) : null}
+
         {applicationUrlIsJobBoard ? (
-          <div className="space-y-2 rounded-xl border border-amber-400/25 bg-amber-500/[0.05] p-3">
-            <p className="text-[12px] font-medium text-amber-100">
-              This application still points at a job listing
-            </p>
-            <p className="text-[11px] leading-relaxed text-amber-100/70">
-              A browser session can only open the employer&apos;s actual
-              application form. Paste that URL below; saving it validates the
-              public destination, refreshes the application and immediately
-              retries the browser session.
-            </p>
-            <EmployerApplicationUrlForm
+          <div className="space-y-3">
+            <ApplicationRedirectPanel
               applicationId={applicationId}
-              initialApplicationUrl={applicationUrl}
-              jobListingUrl={jobListingUrl}
-              employerCareersUrl={employerCareersUrl}
-              suggestedApplicationUrl={suggestedApplicationUrl}
-              isJobBoard
-              submitLabel="Save URL and retry browser"
-              onSaved={() => {
-                void openWorkspace();
-              }}
+              session={session.data}
+              fallbackListingUrl={jobListingUrl ?? applicationUrl}
             />
+            <details className="rounded-xl border border-white/[0.07] bg-white/[0.02] p-3">
+              <summary className="cursor-pointer text-[12px] font-medium text-ink-muted">
+                Easy Apply not supported for this listing?
+              </summary>
+              <p className="mt-2 text-[11px] leading-relaxed text-ink-subtle">
+                If Glassdoor blocks Easy Apply or leads somewhere ApplyPilot does
+                not follow, paste the employer&apos;s own application URL. It is
+                validated and stored as the actual destination, separately from
+                the original listing. Starting the browser then opens this form.
+              </p>
+              <div className="mt-2">
+                <EmployerApplicationUrlForm
+                  applicationId={applicationId}
+                  initialApplicationUrl={applicationUrl}
+                  jobListingUrl={jobListingUrl}
+                  employerCareersUrl={employerCareersUrl}
+                  suggestedApplicationUrl={suggestedApplicationUrl}
+                  isJobBoard
+                  mode="destination"
+                  submitLabel="Save destination and retry browser"
+                  onDestinationSaved={() => {
+                    void openWorkspace();
+                  }}
+                />
+              </div>
+            </details>
           </div>
         ) : null}
 
@@ -698,9 +823,25 @@ export function ApplicationBrowserWorkspace({
                   Employer page
                 </a>
               ) : null}
+              {session.data && !sessionOpen ? (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={recoverSession.isPending}
+                  onClick={() => void recoverAndAttach(false)}
+                >
+                  {recoverSession.isPending ? <Spinner /> : null}
+                  Recover browser
+                </Button>
+              ) : null}
               <Button
                 size="sm"
-                disabled={!canLaunch || startSession.isPending || ticket.isPending}
+                disabled={
+                  !canLaunch ||
+                  startSession.isPending ||
+                  ticket.isPending ||
+                  recoverSession.isPending
+                }
                 onClick={() => void openWorkspace()}
               >
                 {startSession.isPending || ticket.isPending ? (

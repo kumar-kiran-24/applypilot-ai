@@ -1,9 +1,11 @@
 import type { Metadata } from "next";
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
 import { Logo } from "@/components/layout/logo";
 import { LoginForm } from "@/features/auth/login-form";
 import { getCurrentUser, getSessionToken } from "@/lib/auth/session";
+import { RETURN_TO_COOKIE, safeReturnPath } from "@/lib/utils/url";
 
 export const metadata: Metadata = {
   title: "Sign in",
@@ -31,11 +33,22 @@ export default async function LoginPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
+  const cookieStore = await cookies();
+  const rawReturn = cookieStore.get(RETURN_TO_COOKIE)?.value;
+  let returnTo: string | null = null;
+  if (rawReturn) {
+    try {
+      returnTo = safeReturnPath(decodeURIComponent(rawReturn));
+    } catch {
+      returnTo = null;
+    }
+  }
+
   const token = await getSessionToken();
   if (token) {
     const user = await getCurrentUser(token);
     if (user) {
-      redirect("/dashboard");
+      redirect(returnTo ?? "/dashboard");
     }
   }
 

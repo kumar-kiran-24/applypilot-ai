@@ -75,7 +75,10 @@ function renderForm(
     isJobBoard?: boolean;
     initialApplicationUrl?: string;
     suggestedApplicationUrl?: string | null;
+    mode?: "application" | "destination";
+    submitLabel?: string;
     onSaved?: (application: ApplicationPreview) => void;
+    onDestinationSaved?: () => void;
   } = {},
 ) {
   const queryClient = new QueryClient({
@@ -90,7 +93,10 @@ function renderForm(
         employerCareersUrl="https://acme.example/careers"
         suggestedApplicationUrl={overrides.suggestedApplicationUrl ?? null}
         isJobBoard={overrides.isJobBoard ?? false}
+        mode={overrides.mode}
+        submitLabel={overrides.submitLabel}
         onSaved={overrides.onSaved}
+        onDestinationSaved={overrides.onDestinationSaved}
       />
     </QueryClientProvider>,
   );
@@ -189,6 +195,66 @@ describe("EmployerApplicationUrlForm", () => {
     expect(
       await screen.findByText(/must point to a public website/i),
     ).toBeTruthy();
+  });
+
+  it("stores a manual destination separately instead of inspecting the URL", async () => {
+    fetchMock.mockImplementation(async (input) => {
+      const path = String(input).replace(/^.*\/api\/backend\//, "");
+      if (path === `browser-sessions/by-application/${APPLICATION_ID}/destination`) {
+        return json({
+          application_id: APPLICATION_ID,
+          browser_session_id: null,
+          status: "validated",
+          message:
+            "The application destination was saved from your own input and validated. ApplyPilot did not detect it automatically.",
+          listing_url: LISTING,
+          destination_url: FORM,
+          application_platform: "greenhouse",
+          platform_name: "Greenhouse",
+          application_step: null,
+          step_supported: false,
+          destination_validated: true,
+          awaiting_user_action: false,
+          can_analyze: true,
+          authentication_required: false,
+          manual_destination: true,
+          warnings: [],
+        });
+      }
+      return json({ detail: `Unhandled test route: ${path}` }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const saved = vi.fn();
+    renderForm({
+      isJobBoard: true,
+      initialApplicationUrl: LISTING,
+      mode: "destination",
+      submitLabel: "Save destination and retry browser",
+      onDestinationSaved: saved,
+    });
+
+    const input = screen.getByLabelText("Employer application URL");
+    fireEvent.change(input, { target: { value: FORM } });
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /save destination and retry browser/i,
+      }),
+    );
+
+    expect(
+      await screen.findByText(/destination saved and validated/i),
+    ).toBeTruthy();
+    expect(saved).toHaveBeenCalledTimes(1);
+    const [called, init] = fetchMock.mock.calls[0] ?? [];
+    expect(String(called)).toContain(
+      `browser-sessions/by-application/${APPLICATION_ID}/destination`,
+    );
+    expect(JSON.parse(String(init?.body))).toEqual({ destination_url: FORM });
+    expect(
+      fetchMock.mock.calls.some(([call]) =>
+        String(call).includes(`applications/${APPLICATION_ID}/inspect`),
+      ),
+    ).toBe(false);
   });
 
   it("reports an ownership failure and only uses a suggestion on request", async () => {

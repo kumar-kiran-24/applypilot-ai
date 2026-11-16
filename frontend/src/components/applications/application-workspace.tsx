@@ -6,6 +6,7 @@ import {
   ArrowLeft,
   ArrowRight,
   ArrowUpRight,
+  BookOpen,
   CheckCircle2,
   ChevronRight,
   FileText,
@@ -14,6 +15,7 @@ import {
   ShieldCheck,
   Sparkles,
   UserRound,
+  Wand2,
   Workflow,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -46,6 +48,8 @@ import {
   useUpdateApplicationQuestion,
   useUpdateApplicationStage,
 } from "@/features/applications/hooks";
+import { useReusableAnswerSuggestions } from "@/features/answers/hooks";
+import { useDraftAnswer } from "@/features/assistant/hooks";
 import { describeError } from "@/lib/api/errors";
 import { cn } from "@/lib/utils/cn";
 import { formatDate, formatDateTime } from "@/lib/utils/format";
@@ -409,30 +413,81 @@ function fieldControl(
 }
 
 function QuestionField({
+  applicationId,
   question,
   editable,
   saving,
   onSave,
 }: {
+  applicationId: string;
   question: ApplicationQuestion;
   editable: boolean;
   saving: boolean;
-  onSave: (answer: string | null, confirmed: boolean) => void;
+  onSave: (
+    answer: string | null,
+    confirmed: boolean,
+    reusedAnswerKey?: string,
+  ) => void;
 }) {
   const [value, setValue] = useState(
     question.answer ?? question.suggested_answer ?? "",
   );
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [acknowledged, setAcknowledged] = useState(false);
+  const [aiNotice, setAiNotice] = useState<string | null>(null);
+  const [reuseOpen, setReuseOpen] = useState(false);
+  const [reuseNotice, setReuseNotice] = useState<string | null>(null);
+  const [reusedKey, setReusedKey] = useState<string | null>(null);
   const previousAnswer = useRef(question.answer);
+  const aiDraft = useDraftAnswer();
+  const reuseSuggestions = useReusableAnswerSuggestions();
+
+  const requestAiDraft = () => {
+    setAiNotice(null);
+    aiDraft.mutate(
+      { application_id: applicationId, question_id: question.id },
+      {
+        onSuccess: (data) => {
+          if (data.draft_answer) {
+            // Insert into the local editor only. The user still edits and
+            // confirms it through the existing per-application controls.
+            setValue(data.draft_answer);
+            setReusedKey(null);
+            setReuseNotice(null);
+            setAiNotice(
+              data.status === "needs_confirmation"
+                ? "Draft inserted from your verified profile. Review and confirm it below."
+                : `Draft inserted (${data.confidence_label} confidence, ${data.evidence.filter((item) => item.used).length} evidence item(s)). Review and confirm it below.`,
+            );
+            return;
+          }
+          setAiNotice(
+            data.missing_information[0]?.question ??
+              data.warnings[0] ??
+              "No draft could be grounded in your evidence. Answer this yourself or add the missing detail in the assistant.",
+          );
+        },
+      },
+    );
+  };
 
   useEffect(() => {
     if (previousAnswer.current !== question.answer) {
       // Only overwrite local edits when the server value actually changed.
       previousAnswer.current = question.answer;
       setValue(question.answer ?? "");
+      setReusedKey(null);
     }
   }, [question.answer]);
+
+  const requestReuse = () => {
+    setReuseNotice(null);
+    setReuseOpen(true);
+    reuseSuggestions.mutate({
+      applicationId,
+      questionId: question.id,
+    });
+  };
 
   const status = QUESTION_STATUS[question.status];
   const source = SOURCE[question.answer_source];
@@ -440,7 +495,7 @@ function QuestionField({
   const needsFreshConfirmation = question.is_sensitive || question.is_legal;
 
   const confirm = () => {
-    onSave(value.trim() || null, true);
+    onSave(value.trim() || null, true, reusedKey ?? undefined);
     setConfirmOpen(false);
     setAcknowledged(false);
   };
@@ -515,11 +570,46 @@ function QuestionField({
 
         {editable ? (
           <div className="flex flex-wrap items-center gap-1.5">
+            {question.field_type === "textarea" ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={saving || aiDraft.isPending}
+                onClick={requestAiDraft}
+                title="Draft from your verified profile, resume and this posting"
+              >
+                {aiDraft.isPending ? (
+                  <Spinner className="h-3.5 w-3.5" />
+                ) : (
+                  <Wand2 aria-hidden="true" className="h-3.5 w-3.5" />
+                )}
+                {aiDraft.isPending ? "Drafting…" : "Draft with AI"}
+              </Button>
+            ) : null}
+            {question.field_type === "textarea" ||
+            question.field_type === "text" ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={saving || reuseSuggestions.isPending}
+                onClick={requestReuse}
+                title="Insert one of your saved answers and review it here"
+              >
+                {reuseSuggestions.isPending ? (
+                  <Spinner className="h-3.5 w-3.5" />
+                ) : (
+                  <BookOpen aria-hidden="true" className="h-3.5 w-3.5" />
+                )}
+                Reuse saved answer
+              </Button>
+            ) : null}
             <Button
               size="sm"
               variant="ghost"
               disabled={saving || value === (question.answer ?? "")}
-              onClick={() => onSave(value.trim() || null, false)}
+              onClick={() =>
+                onSave(value.trim() || null, false, reusedKey ?? undefined)
+              }
             >
               Save draft
             </Button>
@@ -584,6 +674,122 @@ function QuestionField({
             </Button>
           </div>
         </div>
+      ) : null}
+
+      {reuseOpen ? (
+        <div className="mt-3 space-y-2.5 rounded-xl border border-sky-500/20 bg-sky-500/[0.04] p-3">
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <p className="text-[12px] font-medium text-ink">
+                Reuse a saved answer
+              </p>
+              <p className="mt-0.5 text-[11px] text-ink-subtle">
+                Matching uses this question&apos;s wording and your saved
+                categories. Reviewed answers only; conflicts are blocked.
+              </p>
+            </div>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setReuseOpen(false)}
+            >
+              Close
+            </Button>
+          </div>
+
+          {reuseSuggestions.isPending ? (
+            <div className="flex items-center gap-2 text-[12px] text-ink-muted">
+              <Spinner className="h-3.5 w-3.5" />
+              Looking for relevant answers…
+            </div>
+          ) : reuseSuggestions.isError ? (
+            <p className="text-[11px] text-red-300">
+              {describeError(reuseSuggestions.error)}
+            </p>
+          ) : (reuseSuggestions.data?.suggestions.length ?? 0) === 0 ? (
+            <p className="text-[11px] text-ink-subtle">
+              No saved answer matches this question closely enough. Answer it
+              yourself, or save a reviewed answer first.
+            </p>
+          ) : (
+            <ul className="space-y-2">
+              {reuseSuggestions.data?.suggestions.map((item) => (
+                <li
+                  key={item.question_key}
+                  className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-2.5"
+                >
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <Badge
+                      variant={
+                        item.trust_level === "verified_fact" ||
+                        item.trust_level === "user_reviewed"
+                          ? "success"
+                          : "warning"
+                      }
+                    >
+                      {item.trust_label}
+                    </Badge>
+                    <Badge variant="neutral">{item.category_label}</Badge>
+                    <span className="text-[10px] text-ink-subtle">
+                      {Math.round(item.relevance * 100)}% match
+                    </span>
+                  </div>
+                  <p className="mt-1.5 text-[12px] font-medium text-ink">
+                    {item.question_text}
+                  </p>
+                  <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-[11px] leading-relaxed text-ink-muted">
+                    {item.answer}
+                  </p>
+                  {item.conflicts.length > 0 ? (
+                    <p className="mt-1.5 text-[11px] leading-relaxed text-red-300">
+                      Conflicts with your current verified information
+                      ({item.conflicts[0]?.conflicting_source}:{" "}
+                      {item.conflicts[0]?.conflicting_answer}). It will not be
+                      inserted.
+                    </p>
+                  ) : null}
+                  {item.is_stale && item.freshness_reason ? (
+                    <p className="mt-1.5 text-[11px] leading-relaxed text-amber-300">
+                      {item.freshness_reason}
+                    </p>
+                  ) : null}
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    className="mt-2"
+                    disabled={!item.safe_to_insert}
+                    onClick={() => {
+                      setValue(item.answer);
+                      setReusedKey(item.question_key);
+                      setReuseOpen(false);
+                      setReuseNotice(
+                        "Inserted from your saved answers. Review it, then Save draft or Confirm answer — nothing is submitted.",
+                      );
+                    }}
+                  >
+                    Use this answer
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : null}
+
+      {reuseNotice ? (
+        <p className="mt-2 rounded-lg border border-emerald-500/20 bg-emerald-500/[0.05] px-2.5 py-2 text-[11px] leading-relaxed text-emerald-200">
+          {reuseNotice}
+        </p>
+      ) : null}
+      {aiNotice ? (
+        <p className="mt-2 rounded-lg border border-sky-500/20 bg-sky-500/[0.05] px-2.5 py-2 text-[11px] leading-relaxed text-sky-200">
+          {aiNotice}
+        </p>
+      ) : null}
+      {aiDraft.isError ? (
+        <p className="mt-2 text-[11px] text-red-300">
+          {describeError(aiDraft.error)}
+        </p>
       ) : null}
 
     </div>
@@ -1011,17 +1217,19 @@ export function ApplicationWorkspace({ applicationId }: { applicationId: string 
                     {sectionQuestions.map((question) => (
                       <QuestionField
                         key={question.id}
+                        applicationId={applicationId}
                         question={question}
                         editable={editable}
                         saving={
                           updateQuestion.isPending &&
                           updateQuestion.variables?.questionId === question.id
                         }
-                        onSave={(answer, confirmed) =>
+                        onSave={(answer, confirmed, reusedAnswerKey) =>
                           updateQuestion.mutate({
                             questionId: question.id,
                             answer,
                             confirmed,
+                            reusedAnswerKey,
                           })
                         }
                       />

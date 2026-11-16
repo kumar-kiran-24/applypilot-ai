@@ -9,10 +9,13 @@ import { buttonClasses } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { toApiError } from "@/lib/api/errors";
 import { loginErrorMessage } from "@/lib/auth/login-errors";
+import { RETURN_TO_COOKIE } from "@/lib/utils/url";
 
 interface LoginCallbackViewProps {
   code: string | null;
   error: string | null;
+  /** Sanitised internal path, e.g. `/apply?url=...`; never an absolute URL. */
+  returnTo?: string | null;
 }
 
 const NETWORK_FAILURE =
@@ -26,7 +29,11 @@ const NETWORK_FAILURE =
  * HttpOnly `ap_session` cookie. The token never reaches this component; the
  * code is not persisted anywhere.
  */
-export function LoginCallbackView({ code, error }: LoginCallbackViewProps) {
+export function LoginCallbackView({
+  code,
+  error,
+  returnTo = null,
+}: LoginCallbackViewProps) {
   const started = useRef(false);
   const [failure, setFailure] = useState<string | null>(() => {
     if (error) {
@@ -60,8 +67,10 @@ export function LoginCallbackView({ code, error }: LoginCallbackViewProps) {
           throw apiError;
         }
 
+        // One-time use: the return path must not survive this sign-in.
+        document.cookie = `${RETURN_TO_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax`;
         // `replace` keeps the one-time code out of the browser history.
-        window.location.replace("/dashboard");
+        window.location.replace(returnTo ?? "/dashboard");
       } catch (exchangeError) {
         if (!active) {
           return;
@@ -79,7 +88,7 @@ export function LoginCallbackView({ code, error }: LoginCallbackViewProps) {
     return () => {
       active = false;
     };
-  }, [code, error, failure]);
+  }, [code, error, failure, returnTo]);
 
   return (
     <div className="glass-panel w-full max-w-md p-6 sm:p-8">

@@ -188,13 +188,13 @@ const fetchMock = vi.fn<typeof fetch>();
 let firstTicket: Deferred<BrowserViewTicketResponse>;
 let ticketRequests = 0;
 let startRequests = 0;
-let inspectRequests = 0;
+let destinationRequests = 0;
 
 function installFetch() {
   firstTicket = deferred<BrowserViewTicketResponse>();
   ticketRequests = 0;
   startRequests = 0;
-  inspectRequests = 0;
+  destinationRequests = 0;
 
   fetchMock.mockImplementation(async (input) => {
     const url = String(input);
@@ -210,14 +210,28 @@ function installFetch() {
       startRequests += 1;
       return json(openSession());
     }
-    if (path === `applications/${APPLICATION_ID}/inspect`) {
-      inspectRequests += 1;
+    if (
+      path === `browser-sessions/by-application/${APPLICATION_ID}/destination`
+    ) {
+      destinationRequests += 1;
       return json({
-        application_url: "https://jobs.example.com/apply",
-        job_listing_url: "https://www.glassdoor.com/job-listing/x.htm",
-        employer_careers_url: null,
-        application_url_is_job_board: false,
-        suggested_application_url: null,
+        application_id: APPLICATION_ID,
+        browser_session_id: null,
+        status: "validated",
+        message:
+          "The application destination was saved from your own input and validated. ApplyPilot did not detect it automatically.",
+        listing_url: "https://www.glassdoor.com/job-listing/x.htm",
+        destination_url: "https://jobs.example.com/apply",
+        application_platform: "greenhouse",
+        platform_name: "Greenhouse",
+        application_step: null,
+        step_supported: false,
+        destination_validated: true,
+        awaiting_user_action: false,
+        can_analyze: true,
+        authentication_required: false,
+        manual_destination: true,
+        warnings: [],
       });
     }
     if (
@@ -415,14 +429,17 @@ describe("ApplicationBrowserWorkspace live view", () => {
     );
   });
 
-  it("asks for the employer URL and retries the browser after saving it", async () => {
+  it("saves a manual destination and retries the browser from it", async () => {
     renderWorkspace({
       applicationUrlIsJobBoard: true,
       jobListingUrl: "https://www.glassdoor.com/job-listing/x.htm",
     });
 
     expect(
-      await screen.findByText(/this application still points at a job listing/i),
+      await screen.findByText(/easy apply not supported for this listing/i),
+    ).toBeTruthy();
+    expect(
+      await screen.findByText(/waiting for you to click easy apply/i),
     ).toBeTruthy();
     const input = screen.getByLabelText(
       "Employer application URL",
@@ -433,10 +450,12 @@ describe("ApplicationBrowserWorkspace live view", () => {
       target: { value: "https://jobs.example.com/apply" },
     });
     fireEvent.click(
-      screen.getByRole("button", { name: /save url and retry browser/i }),
+      screen.getByRole("button", {
+        name: /save destination and retry browser/i,
+      }),
     );
 
-    await waitFor(() => expect(inspectRequests).toBe(1));
+    await waitFor(() => expect(destinationRequests).toBe(1));
     await waitFor(() => expect(startRequests).toBe(1), { timeout: 4000 });
     act(() => {
       firstTicket.resolve(ticket());
@@ -488,5 +507,164 @@ describe("ApplicationBrowserWorkspace live view", () => {
     ).toBeTruthy();
     const start = screen.getByRole("button", { name: /open live view/i });
     expect((start as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("recovers an expired session and never ends a live blocker until asked", async () => {
+    const expired: BrowserSession = {
+      ...openSession(),
+      state: "paused",
+      browser_status: "expired",
+      failure_code: "browser_session_expired",
+      failure_reason:
+        "The browser session expired or was closed. ApplyPilot did not preserve the employer's page.",
+      active: false,
+      can_pause: false,
+      can_resume: false,
+    };
+    let recoverCalls = 0;
+    let forced = false;
+
+    fetchMock.mockImplementation(async (input, init) => {
+      const path = String(input).replace(/^.*\/api\/backend\//, "");
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (path === "browser-sessions/capabilities") {
+        return json(capabilities());
+      }
+      if (path === `browser-sessions/by-application/${APPLICATION_ID}`) {
+        return json(expired);
+      }
+      if (path === "browser-sessions" && method === "POST") {
+        // The exact error that used to leave the workspace stuck.
+        return json(
+          {
+            detail:
+              "Only one live browser session is allowed at a time. Pause or cancel the open session first.",
+            code: "browser_session_limit_reached",
+          },
+          409,
+        );
+      }
+      if (
+        path ===
+        `browser-sessions/by-application/${APPLICATION_ID}/recover`
+      ) {
+        recoverCalls += 1;
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+        if (!body.force) {
+          return json({
+            recovered: false,
+            session: null,
+            blocked_by: [
+              {
+                session_id: "99999999-9999-4999-8999-999999999999",
+                application_id: "88888888-8888-4888-8888-888888888888",
+                job_id: null,
+                job_title: "Other Backend Role",
+                company: "Other Co",
+                state: "browser_ready",
+                browser_status: "open",
+              },
+            ],
+            closed_session_ids: [],
+            message:
+              "A live browser session is open for another application. End that session before starting this one, or recover it explicitly.",
+          });
+        }
+        forced = true;
+        return json({
+          recovered: true,
+          session: openSession(),
+          blocked_by: [],
+          closed_session_ids: ["99999999-9999-4999-8999-999999999999"],
+          message: "Closed the other live session and started this one.",
+        });
+      }
+      if (
+        path === `browser-sessions/by-application/${APPLICATION_ID}/view-ticket`
+      ) {
+        return json(ticket());
+      }
+      if (path === `browser-sessions/by-application/${APPLICATION_ID}/fill`) {
+        return json(fillExecution());
+      }
+      if (
+        path ===
+        `browser-sessions/by-application/${APPLICATION_ID}/interventions`
+      ) {
+        return json({
+          application_id: APPLICATION_ID,
+          application_url: openSession().application_url,
+          browser_session_id: openSession().session_id,
+          view: capabilities().view,
+          total: 0,
+          pending_count: 0,
+          user_working_count: 0,
+          blocking_count: 0,
+          interventions: [],
+          final_submission_note:
+            "ApplyPilot never clicks the final Submit/Apply button.",
+        });
+      }
+      if (
+        path ===
+        `browser-sessions/by-application/${APPLICATION_ID}/final-review`
+      ) {
+        return json({
+          application_id: APPLICATION_ID,
+          execution_id: null,
+          execution_status: "planned",
+          analysis_version: null,
+          ready_for_final_review: false,
+          generated_at: new Date().toISOString(),
+          resume: { resume_id: null, filename: null },
+          sections: [],
+          filled_field_labels: [],
+          verified_field_labels: [],
+          skipped_field_labels: [],
+          confirmation_fields: [],
+          blocking_interventions: [],
+          missing_optional_fields: [],
+          filled_count: 0,
+          verified_count: 0,
+          skipped_count: 0,
+          blocker_count: 0,
+          view: capabilities().view,
+          manual_submission_required: true,
+          final_submission_note:
+            "ApplyPilot never clicks the final Submit/Apply button.",
+        });
+      }
+      return json({ detail: `Unhandled test route: ${path}` }, 404);
+    });
+
+    renderWorkspace();
+
+    const recover = await screen.findByRole("button", {
+      name: /recover browser/i,
+    });
+    fireEvent.click(recover);
+
+    // The blocker is named and nothing was ended yet.
+    expect(
+      await screen.findByText(/another application has the live browser/i),
+    ).toBeTruthy();
+    expect(screen.getByText(/other backend role/i)).toBeTruthy();
+    expect(recoverCalls).toBe(1);
+    expect(forced).toBe(false);
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /end that session and continue/i,
+      }),
+    );
+
+    await waitFor(() => expect(forced).toBe(true));
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1), {
+      timeout: 4000,
+    });
+    act(() => {
+      socketAt(0).deliver({ type: "ready", width: 1280, height: 900 });
+    });
+    expect(await screen.findByText("Connected")).toBeTruthy();
   });
 });

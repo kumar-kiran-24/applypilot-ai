@@ -19,7 +19,7 @@ import type {
   AutomationMode,
 } from "@/types/api";
 
-const STATUS: Record<
+export const APPLICATION_STATUS: Record<
   ApplicationStatus,
   { label: string; variant: "neutral" | "success" | "warning" | "danger" | "brand" }
 > = {
@@ -35,7 +35,7 @@ const STATUS: Record<
   cancelled: { label: "Cancelled", variant: "neutral" },
 };
 
-const STAGE_LABEL: Record<ApplicationStage, string> = {
+export const APPLICATION_STAGE_LABEL: Record<ApplicationStage, string> = {
   applied: "Applied",
   screening: "Screening",
   interview: "Interview",
@@ -51,7 +51,7 @@ const MODE_LABEL: Record<AutomationMode, string> = {
 };
 
 function ApplicationRow({ application }: { application: ApplicationSummary }) {
-  const status = STATUS[application.status];
+  const status = APPLICATION_STATUS[application.status];
   return (
     <Link
       href={`/applications/${application.id}`}
@@ -69,7 +69,9 @@ function ApplicationRow({ application }: { application: ApplicationSummary }) {
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {application.stage ? (
-            <Badge variant="brand">{STAGE_LABEL[application.stage]}</Badge>
+            <Badge variant="brand">
+              {APPLICATION_STAGE_LABEL[application.stage]}
+            </Badge>
           ) : null}
           <Badge variant={status.variant}>{status.label}</Badge>
           <ChevronRight

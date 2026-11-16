@@ -1,11 +1,15 @@
 import { apiFetch } from "@/lib/api/client";
 import type {
   ApplicationListResponse,
+  ApplicationPipeline,
   ApplicationPreview,
+  ApplicationRedirectResponse,
   ApplicationWorkflow,
   ApplicationStage,
   BrowserSession,
   BrowserSessionCapabilitiesResponse,
+  BrowserSessionListResponse,
+  BrowserSessionRecoveryResponse,
   BrowserViewTicketResponse,
   FillExecutionResponse,
   FillPlanResponse,
@@ -20,6 +24,7 @@ import type {
 export const applicationKeys = {
   all: ["applications"] as const,
   list: ["applications", "list"] as const,
+  pipeline: ["applications", "pipeline"] as const,
   detail: (id: string) => ["applications", "detail", id] as const,
   workflow: (id: string) => ["applications", "workflow", id] as const,
   platforms: ["applications", "platforms"] as const,
@@ -35,6 +40,7 @@ export const browserSessionKeys = {
   all: ["browser-session"] as const,
   detail: (id: string) => ["browser-session", "detail", id] as const,
   capabilities: ["browser-session", "capabilities"] as const,
+  active: ["browser-session", "active"] as const,
 };
 
 export const humanLoopKeys = {
@@ -47,6 +53,11 @@ export const humanLoopKeys = {
 
 export function fetchApplications(): Promise<ApplicationListResponse> {
   return apiFetch<ApplicationListResponse>("applications");
+}
+
+/** Counts by the backend's stored status/stage, plus the latest applications. */
+export function fetchApplicationPipeline(): Promise<ApplicationPipeline> {
+  return apiFetch<ApplicationPipeline>("applications/pipeline");
 }
 
 export function fetchApplication(id: string): Promise<ApplicationPreview> {
@@ -93,11 +104,26 @@ export function inspectApplication(
 export function updateApplicationQuestion(
   id: string,
   questionId: string,
-  input: { answer: string | null; confirmed: boolean; note?: string | null },
+  input: {
+    answer: string | null;
+    confirmed: boolean;
+    note?: string | null;
+    reusedAnswerKey?: string | null;
+  },
 ): Promise<ApplicationPreview> {
   return apiFetch<ApplicationPreview>(
     `applications/${id}/questions/${questionId}`,
-    { method: "PATCH", body: input },
+    {
+      method: "PATCH",
+      body: {
+        answer: input.answer,
+        confirmed: input.confirmed,
+        ...(input.note !== undefined ? { note: input.note } : {}),
+        ...(input.reusedAnswerKey
+          ? { reused_answer_key: input.reusedAnswerKey }
+          : {}),
+      },
+    },
   );
 }
 
@@ -189,6 +215,49 @@ export function cancelBrowserSession(id: string): Promise<BrowserSession> {
   );
 }
 
+export function detectApplicationDestination(
+  id: string,
+): Promise<ApplicationRedirectResponse> {
+  return apiFetch<ApplicationRedirectResponse>(
+    `browser-sessions/by-application/${id}/detect-destination`,
+    { method: "POST", timeoutMs: 60_000 },
+  );
+}
+
+/**
+ * Stores a destination supplied by the user. It is validated like a detected
+ * one, but the backend labels it as manual instead of pretending it watched a
+ * redirect.
+ */
+export function setApplicationDestination(
+  id: string,
+  destinationUrl: string,
+): Promise<ApplicationRedirectResponse> {
+  return apiFetch<ApplicationRedirectResponse>(
+    `browser-sessions/by-application/${id}/destination`,
+    { method: "POST", body: { destination_url: destinationUrl }, timeoutMs: 60_000 },
+  );
+}
+
+/** Lists browser sessions whose browser is genuinely open for this user. */
+export function fetchActiveBrowserSessions(): Promise<BrowserSessionListResponse> {
+  return apiFetch<BrowserSessionListResponse>("browser-sessions/active");
+}
+
+/**
+ * Reconciles every owned session and starts this application's browser. Without
+ * `force` a live session on another application is reported, never ended.
+ */
+export function recoverBrowserSession(
+  id: string,
+  force = false,
+): Promise<BrowserSessionRecoveryResponse> {
+  return apiFetch<BrowserSessionRecoveryResponse>(
+    `browser-sessions/by-application/${id}/recover`,
+    { method: "POST", body: { force }, timeoutMs: 90_000 },
+  );
+}
+
 export function analyzeApplicationForm(id: string): Promise<unknown> {
   return apiFetch<unknown>(
     `browser-sessions/by-application/${id}/form-analysis`,
@@ -210,11 +279,16 @@ export function fetchFillExecution(id: string): Promise<FillExecutionResponse> {
 
 export function startFieldFill(
   id: string,
+  approvalFingerprint: string,
   restart = false,
 ): Promise<FillExecutionResponse> {
   return apiFetch<FillExecutionResponse>(
     `browser-sessions/by-application/${id}/fill`,
-    { method: "POST", body: { restart }, timeoutMs: 120_000 },
+    {
+      method: "POST",
+      body: { approval_fingerprint: approvalFingerprint, restart },
+      timeoutMs: 120_000,
+    },
   );
 }
 
@@ -228,10 +302,17 @@ export function pauseFieldFill(
   );
 }
 
-export function resumeFieldFill(id: string): Promise<FillExecutionResponse> {
+export function resumeFieldFill(
+  id: string,
+  approvalFingerprint: string,
+): Promise<FillExecutionResponse> {
   return apiFetch<FillExecutionResponse>(
     `browser-sessions/by-application/${id}/fill/resume`,
-    { method: "POST", timeoutMs: 120_000 },
+    {
+      method: "POST",
+      body: { approval_fingerprint: approvalFingerprint },
+      timeoutMs: 120_000,
+    },
   );
 }
 

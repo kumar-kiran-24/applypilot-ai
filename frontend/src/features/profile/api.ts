@@ -11,6 +11,7 @@ import type {
   ProfileCompleteness,
   ProjectEntry,
   RelocationPreference,
+  SavedAnswer,
   WorkMode,
 } from "@/types/api";
 
@@ -201,6 +202,24 @@ export function deleteCertification(id: string): Promise<DeleteResponse> {
 
 export function fetchReusableAnswers(): Promise<ApplicationAnswer[]> {
   return apiFetch<ApplicationAnswer[]>("profile/answers");
+}
+
+export interface ReusableAnswerInput {
+  question_text: string;
+  answer: string;
+  answer_source?: "ai_suggestion" | "user_input" | "profile" | "resume" | "previously_approved";
+  confidence?: number;
+  verification_status?: "verified" | "derived" | "unknown";
+}
+
+export function upsertReusableAnswer(
+  key: string,
+  input: ReusableAnswerInput,
+): Promise<SavedAnswer> {
+  return apiFetch<SavedAnswer>(`profile/answers/${key}`, {
+    method: "PUT",
+    body: input,
+  });
 }
 
 export function deleteReusableAnswer(key: string): Promise<DeleteResponse> {

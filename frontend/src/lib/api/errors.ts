@@ -58,7 +58,11 @@ export async function toApiError(response: Response): Promise<ApiError> {
       ? detail
       : response.status === 401
         ? "Your session has expired. Sign in again."
-        : FALLBACK_MESSAGE;
+        : response.status >= 500
+          ? // No JSON envelope from a 5xx: the failure happened in this app's
+            // own server (for example a broken dev build), not in the API.
+            `ApplyPilot's web server failed while handling this request (HTTP ${response.status}). Reload the page, then try again.`
+          : FALLBACK_MESSAGE;
 
   return new ApiError(response.status, message, code, details);
 }

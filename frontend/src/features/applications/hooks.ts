@@ -12,10 +12,13 @@ import {
   cancelFieldFill,
   cancelIntervention,
   createBrowserViewTicket,
+  detectApplicationDestination,
+  fetchActiveBrowserSessions,
   fetchBrowserCapabilities,
   fetchBrowserSession,
   confirmManualSubmission,
   fetchApplication,
+  fetchApplicationPipeline,
   fetchApplicationWorkflow,
   fetchApplications,
   fetchFillExecution,
@@ -30,11 +33,13 @@ import {
   pauseBrowserSession,
   pauseFieldFill,
   reanalyzeHumanLoop,
+  recoverBrowserSession,
   resumeBrowserSession,
   resolveIntervention,
   resumeFieldFill,
   resumeHumanLoop,
   selectApplicationResume,
+  setApplicationDestination,
   startBrowserSession,
   startFieldFill,
   submitApplication,
@@ -44,11 +49,15 @@ import {
 import { resumeKeys } from "@/features/resumes/api";
 import type {
   ApplicationListResponse,
+  ApplicationPipeline,
   ApplicationPreview,
+  ApplicationRedirectResponse,
   ApplicationStage,
   ApplicationWorkflow,
   BrowserSession,
   BrowserSessionCapabilitiesResponse,
+  BrowserSessionListResponse,
+  BrowserSessionRecoveryResponse,
   BrowserViewTicketResponse,
   FillExecutionResponse,
   FillPlanResponse,
@@ -78,10 +87,20 @@ export function useApplications() {
   });
 }
 
-export function useApplication(id: string) {
+/** Dashboard aggregation over the stored application status and stage. */
+export function useApplicationPipeline() {
+  return useQuery<ApplicationPipeline>({
+    queryKey: applicationKeys.pipeline,
+    queryFn: fetchApplicationPipeline,
+    staleTime: 15_000,
+  });
+}
+
+export function useApplication(id: string, enabled = true) {
   return useQuery<ApplicationPreview>({
     queryKey: applicationKeys.detail(id),
     queryFn: () => fetchApplication(id),
+    enabled: enabled && Boolean(id),
     retry: false,
   });
 }
@@ -137,10 +156,21 @@ export function useUpdateApplicationQuestion(id: string) {
   return useMutation<
     ApplicationPreview,
     Error,
-    { questionId: string; answer: string | null; confirmed: boolean; note?: string | null }
+    {
+      questionId: string;
+      answer: string | null;
+      confirmed: boolean;
+      note?: string | null;
+      reusedAnswerKey?: string | null;
+    }
   >({
-    mutationFn: ({ questionId, answer, confirmed, note }) =>
-      updateApplicationQuestion(id, questionId, { answer, confirmed, note }),
+    mutationFn: ({ questionId, answer, confirmed, note, reusedAnswerKey }) =>
+      updateApplicationQuestion(id, questionId, {
+        answer,
+        confirmed,
+        note,
+        reusedAnswerKey,
+      }),
     onSuccess: async () => {
       await invalidateApplications(queryClient, id);
     },
@@ -341,6 +371,72 @@ export function useResumeBrowserSession(id: string) {
   });
 }
 
+export function useDetectApplicationDestination(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation<ApplicationRedirectResponse, Error, void>({
+    mutationFn: () => detectApplicationDestination(id),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: browserSessionKeys.detail(id),
+      });
+      await queryClient.invalidateQueries({
+        queryKey: applicationKeys.detail(id),
+      });
+      await queryClient.invalidateQueries({
+        queryKey: applicationKeys.workflow(id),
+      });
+      await queryClient.invalidateQueries({ queryKey: applicationKeys.list });
+    },
+  });
+}
+
+/** Reconciles stale rows and starts (or reattaches) the browser session. */
+export function useRecoverBrowserSession(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation<BrowserSessionRecoveryResponse, Error, boolean>({
+    mutationFn: (force) => recoverBrowserSession(id, force),
+    onSuccess: async (data) => {
+      if (data.session) {
+        queryClient.setQueryData(browserSessionKeys.detail(id), data.session);
+      }
+      await queryClient.invalidateQueries({ queryKey: browserSessionKeys.active });
+      await queryClient.invalidateQueries({ queryKey: fillKeys.all });
+      await queryClient.invalidateQueries({ queryKey: humanLoopKeys.all });
+      await queryClient.invalidateQueries({ queryKey: applicationKeys.all });
+    },
+  });
+}
+
+export function useActiveBrowserSessions(enabled = true) {
+  return useQuery<BrowserSessionListResponse>({
+    queryKey: browserSessionKeys.active,
+    queryFn: fetchActiveBrowserSessions,
+    enabled,
+    staleTime: 5_000,
+    retry: false,
+  });
+}
+
+/** Saves a user-supplied application destination, separately from the listing. */
+export function useSetApplicationDestination(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation<ApplicationRedirectResponse, Error, string>({
+    mutationFn: (destinationUrl) => setApplicationDestination(id, destinationUrl),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: browserSessionKeys.detail(id),
+      });
+      await queryClient.invalidateQueries({
+        queryKey: applicationKeys.detail(id),
+      });
+      await queryClient.invalidateQueries({
+        queryKey: applicationKeys.workflow(id),
+      });
+      await queryClient.invalidateQueries({ queryKey: applicationKeys.list });
+    },
+  });
+}
+
 export function useBrowserViewTicket(id: string) {
   return useMutation<BrowserViewTicketResponse, Error, void>({
     mutationFn: () => createBrowserViewTicket(id),
@@ -375,8 +471,19 @@ function useFillMutation<TVariables>(
   });
 }
 
+export interface StartFieldFillVariables {
+  approvalFingerprint: string;
+  restart?: boolean;
+}
+
 export function useStartFieldFill(id: string) {
-  return useFillMutation<boolean>(id, (restart) => startFieldFill(id, restart));
+  return useFillMutation<StartFieldFillVariables>(id, (variables) =>
+    startFieldFill(
+      id,
+      variables.approvalFingerprint,
+      variables.restart ?? false,
+    ),
+  );
 }
 
 export function usePauseFieldFill(id: string) {
@@ -384,7 +491,9 @@ export function usePauseFieldFill(id: string) {
 }
 
 export function useResumeFieldFill(id: string) {
-  return useFillMutation<void>(id, () => resumeFieldFill(id));
+  return useFillMutation<string>(id, (approvalFingerprint) =>
+    resumeFieldFill(id, approvalFingerprint),
+  );
 }
 
 export function useCancelFieldFill(id: string) {

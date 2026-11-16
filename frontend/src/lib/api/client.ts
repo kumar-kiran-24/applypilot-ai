@@ -43,9 +43,12 @@ export async function bffFetch<T>(
     if (error instanceof DOMException && error.name === "AbortError") {
       throw new ApiError(408, "The request timed out. Please try again.");
     }
+    // This fetch goes to this app's own route handler, not to FastAPI. If it
+    // throws, the Next.js server is down or the connection dropped - telling
+    // the user to start the *backend* sent them to the wrong process.
     throw new ApiError(
       503,
-      "The ApplyPilot API could not be reached. Check that the backend is running.",
+      "The ApplyPilot web app could not be reached. Reload the page, then try again.",
     );
   } finally {
     clearTimeout(timeout);

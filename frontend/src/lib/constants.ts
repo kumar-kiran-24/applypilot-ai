@@ -43,16 +43,63 @@ const PROXY_ROUTES: ReadonlyArray<{
   {
     method: "GET",
     pattern: /^jobs$/,
-    route: { response: "json", queryKeys: ["limit", "offset"] },
+    route: {
+      response: "json",
+      queryKeys: [
+        "limit",
+        "offset",
+        "q",
+        "company",
+        "location",
+        "source",
+        "has_matches",
+        "state",
+        "sort",
+      ],
+    },
   },
   {
     method: "POST",
     pattern: /^jobs\/discover$/,
     route: { response: "json", queryKeys: GLASSDOOR_QUERY_KEYS },
   },
+  // Direct import of a pasted Glassdoor listing (`/apply?url=...` and the
+  // dashboard card). The backend validates the host, path and DNS itself.
+  { method: "POST", pattern: /^jobs\/import$/, route: JSON_ROUTE },
+  { method: "GET", pattern: /^jobs\/saved$/, route: JSON_ROUTE },
   {
     method: "GET",
     pattern: new RegExp(`^jobs/${UUID_PATTERN}$`),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "POST",
+    pattern: new RegExp(`^jobs/${UUID_PATTERN}/save$`),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "DELETE",
+    pattern: new RegExp(`^jobs/${UUID_PATTERN}/save$`),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "POST",
+    pattern: new RegExp(`^jobs/${UUID_PATTERN}/dismiss$`),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "POST",
+    pattern: new RegExp(`^jobs/${UUID_PATTERN}/restore$`),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "POST",
+    pattern: new RegExp(`^jobs/${UUID_PATTERN}/analyze$`),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "GET",
+    pattern: new RegExp(`^jobs/${UUID_PATTERN}/intelligence$`),
     route: JSON_ROUTE,
   },
   {
@@ -119,7 +166,18 @@ const PROXY_ROUTES: ReadonlyArray<{
   },
   { method: "GET", pattern: /^profile\/preferences$/, route: JSON_ROUTE },
   { method: "PUT", pattern: /^profile\/preferences$/, route: JSON_ROUTE },
-  { method: "GET", pattern: /^profile\/answers$/, route: JSON_ROUTE },
+  {
+    method: "GET",
+    pattern: /^profile\/answers$/,
+    route: { response: "json", queryKeys: ["q", "category", "trust"] },
+  },
+  { method: "GET", pattern: /^profile\/answers\/categories$/, route: JSON_ROUTE },
+  { method: "GET", pattern: /^profile\/answers\/knowledge$/, route: JSON_ROUTE },
+  {
+    method: "GET",
+    pattern: /^profile\/answers\/[a-z0-9][a-z0-9_.-]*$/,
+    route: JSON_ROUTE,
+  },
   {
     method: "PUT",
     pattern: /^profile\/answers\/[a-z0-9][a-z0-9_.-]*$/,
@@ -130,9 +188,16 @@ const PROXY_ROUTES: ReadonlyArray<{
     pattern: /^profile\/answers\/[a-z0-9][a-z0-9_.-]*$/,
     route: JSON_ROUTE,
   },
+  {
+    method: "POST",
+    pattern: /^profile\/answers\/[a-z0-9][a-z0-9_.-]*\/resolve$/,
+    route: JSON_ROUTE,
+  },
+  { method: "POST", pattern: /^assistant\/answers\/draft$/, route: JSON_ROUTE },
   { method: "GET", pattern: /^applications$/, route: JSON_ROUTE },
   { method: "GET", pattern: /^applications\/platforms$/, route: JSON_ROUTE },
   { method: "POST", pattern: /^applications\/analyze$/, route: JSON_ROUTE },
+  { method: "GET", pattern: /^applications\/pipeline$/, route: JSON_ROUTE },
   {
     method: "GET",
     pattern: new RegExp(`^applications/${UUID_PATTERN}$`),
@@ -141,6 +206,18 @@ const PROXY_ROUTES: ReadonlyArray<{
   {
     method: "POST",
     pattern: new RegExp(`^applications/${UUID_PATTERN}/inspect$`),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "GET",
+    pattern: new RegExp(`^applications/${UUID_PATTERN}/workflow$`),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "GET",
+    pattern: new RegExp(
+      `^applications/${UUID_PATTERN}/questions/${UUID_PATTERN}/reusable-answers$`,
+    ),
     route: JSON_ROUTE,
   },
   {
@@ -232,6 +309,11 @@ const PROXY_ROUTES: ReadonlyArray<{
   { method: "GET", pattern: /^browser-sessions\/capabilities$/, route: JSON_ROUTE },
   {
     method: "GET",
+    pattern: /^browser-sessions\/active$/,
+    route: JSON_ROUTE,
+  },
+  {
+    method: "GET",
     pattern: new RegExp(`^browser-sessions/by-application/${UUID_PATTERN}$`),
     route: JSON_ROUTE,
   },
@@ -252,7 +334,39 @@ const PROXY_ROUTES: ReadonlyArray<{
   {
     method: "POST",
     pattern: new RegExp(
+      `^browser-sessions/by-application/${UUID_PATTERN}/detect-destination$`,
+    ),
+    route: JSON_ROUTE,
+  },
+  {
+    // User-supplied employer form URL when Easy Apply is blocked or leads
+    // somewhere ApplyPilot does not follow. Validated server-side.
+    method: "POST",
+    pattern: new RegExp(
+      `^browser-sessions/by-application/${UUID_PATTERN}/destination$`,
+    ),
+    route: JSON_ROUTE,
+  },
+  {
+    // Reconciles stale sessions and starts/re-attaches this application's
+    // browser. Never ends another user's session.
+    method: "POST",
+    pattern: new RegExp(
+      `^browser-sessions/by-application/${UUID_PATTERN}/recover$`,
+    ),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "POST",
+    pattern: new RegExp(
       `^browser-sessions/by-application/${UUID_PATTERN}/form-analysis$`,
+    ),
+    route: JSON_ROUTE,
+  },
+  {
+    method: "GET",
+    pattern: new RegExp(
+      `^browser-sessions/by-application/${UUID_PATTERN}/form-analysis/fields$`,
     ),
     route: JSON_ROUTE,
   },

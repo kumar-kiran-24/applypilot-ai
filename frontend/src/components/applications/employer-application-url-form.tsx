@@ -6,7 +6,10 @@ import { useEffect, useState, type FormEvent } from "react";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
-import { useInspectApplication } from "@/features/applications/hooks";
+import {
+  useInspectApplication,
+  useSetApplicationDestination,
+} from "@/features/applications/hooks";
 import { describeError } from "@/lib/api/errors";
 import { safeExternalUrl } from "@/lib/utils/url";
 import type { ApplicationPreview } from "@/types/api";
@@ -30,8 +33,10 @@ export function EmployerApplicationUrlForm({
   suggestedApplicationUrl,
   isJobBoard,
   disabled = false,
-  submitLabel = "Save employer URL",
+  submitLabel,
+  mode = "application",
   onSaved,
+  onDestinationSaved,
 }: {
   applicationId: string;
   initialApplicationUrl: string;
@@ -41,9 +46,21 @@ export function EmployerApplicationUrlForm({
   isJobBoard: boolean;
   disabled?: boolean;
   submitLabel?: string;
+  /**
+   * `application` replaces the page the browser opens. `destination` stores the
+   * form separately from the listing and leaves `application_url` untouched.
+   */
+  mode?: "application" | "destination";
   onSaved?: (application: ApplicationPreview) => void;
+  onDestinationSaved?: () => void;
 }) {
   const inspect = useInspectApplication(applicationId);
+  const destination = useSetApplicationDestination(applicationId);
+  const pending = mode === "destination" ? destination.isPending : inspect.isPending;
+  const failure = mode === "destination" ? destination.error : inspect.error;
+  const actionLabel =
+    submitLabel ??
+    (mode === "destination" ? "Save application destination" : "Save employer URL");
   // Never pre-fill the form with the job-board link: that is exactly the URL
   // the user must replace, and leaving it looks like a valid application form.
   const [applicationUrl, setApplicationUrl] = useState(
@@ -60,13 +77,22 @@ export function EmployerApplicationUrlForm({
   }, [employerCareersUrl]);
 
   const listingLink = safeExternalUrl(jobListingUrl);
-  const saved = inspect.isSuccess && !inspect.isPending;
+  const saved =
+    mode === "destination"
+      ? destination.isSuccess && !destination.isPending
+      : inspect.isSuccess && !inspect.isPending;
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const trimmed = applicationUrl.trim();
     if (!trimmed) return;
     try {
+      if (mode === "destination") {
+        const stored = await destination.mutateAsync(trimmed);
+        if (stored.destination_url) setApplicationUrl(stored.destination_url);
+        onDestinationSaved?.();
+        return;
+      }
       const updated = await inspect.mutateAsync({
         applicationUrl: trimmed,
         employerCareersUrl: careersUrl.trim() || null,
@@ -84,10 +110,9 @@ export function EmployerApplicationUrlForm({
       {isJobBoard ? (
         <Alert variant="warning" title="Add the employer's application URL">
           <p>
-            The saved link is a job listing. ApplyPilot opens the employer&apos;s
-            own form, so paste the application URL from the company&apos;s site
-            or careers portal below. Job boards are never scraped or opened by
-            the browser.
+            {mode === "destination"
+              ? "Glassdoor did not hand ApplyPilot a usable form. Paste the employer's own application URL; it is validated and stored as the destination while the original listing stays recorded. Job boards are never scraped."
+              : "The saved link is a job listing. ApplyPilot opens the employer's own form, so paste the application URL from the company's site or careers portal below. Job boards are never scraped or opened by the browser."}
           </p>
         </Alert>
       ) : null}
@@ -124,7 +149,7 @@ export function EmployerApplicationUrlForm({
           value={careersUrl}
           onChange={(event) => setCareersUrl(event.target.value)}
           className={inputClass}
-          disabled={disabled || inspect.isPending}
+          disabled={disabled || pending}
           placeholder="https://company.com/careers"
         />
         <p className="text-[11px] text-ink-subtle">
@@ -145,7 +170,7 @@ export function EmployerApplicationUrlForm({
           value={applicationUrl}
           onChange={(event) => setApplicationUrl(event.target.value)}
           className={inputClass}
-          disabled={disabled || inspect.isPending}
+          disabled={disabled || pending}
           aria-label="Employer application URL"
           placeholder="https://boards.greenhouse.io/company/jobs/123"
         />
@@ -173,7 +198,7 @@ export function EmployerApplicationUrlForm({
             type="button"
             size="sm"
             variant="secondary"
-            disabled={disabled || inspect.isPending}
+            disabled={disabled || pending}
             onClick={() => setApplicationUrl(suggestedApplicationUrl)}
           >
             Use suggestion
@@ -181,16 +206,18 @@ export function EmployerApplicationUrlForm({
         </div>
       ) : null}
 
-      {inspect.error ? (
+      {failure ? (
         <Alert variant="danger" title="The employer URL was not accepted">
-          {describeError(inspect.error)}
+          {describeError(failure)}
         </Alert>
       ) : null}
 
       {saved ? (
         <p className="flex items-center gap-1.5 text-[11px] text-emerald-200/90">
           <CheckCircle2 aria-hidden="true" className="h-3.5 w-3.5" />
-          Employer URL saved. The application data has been refreshed.
+          {mode === "destination"
+            ? "Destination saved and validated. The listing URL stays recorded."
+            : "Employer URL saved. The application data has been refreshed."}
         </p>
       ) : null}
 
@@ -199,17 +226,17 @@ export function EmployerApplicationUrlForm({
           <Button
             type="submit"
             variant="secondary"
-            disabled={!applicationUrl.trim() || inspect.isPending}
+            disabled={!applicationUrl.trim() || pending}
           >
-            {inspect.isPending ? (
+            {pending ? (
               <>
                 <Spinner className="h-4 w-4" />
-                Validating and inspecting…
+                Validating…
               </>
             ) : (
               <>
                 <RefreshCw aria-hidden="true" className="h-4 w-4" />
-                {submitLabel}
+                {actionLabel}
               </>
             )}
           </Button>

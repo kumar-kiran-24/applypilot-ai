@@ -68,6 +68,13 @@ export interface BestMatchSummary {
   explanation: string;
 }
 
+export interface JobUserState {
+  saved: boolean;
+  dismissed: boolean;
+  saved_at: string | null;
+  dismissed_at: string | null;
+}
+
 export interface Job {
   id: string;
   job_title: string;
@@ -82,6 +89,31 @@ export interface Job {
   requirements: JobRequirements;
   best_match: BestMatchSummary | null;
   matches_count: number;
+  user_state: JobUserState;
+}
+
+/** Exactly the filters the backend accepts on `GET /jobs`. */
+export type JobStateFilter = "active" | "saved" | "dismissed" | "all";
+
+export type JobSort =
+  | "received_desc"
+  | "received_asc"
+  | "title_asc"
+  | "title_desc"
+  | "company_asc"
+  | "company_desc"
+  | "saved_desc";
+
+export interface JobListQuery {
+  limit?: number;
+  offset?: number;
+  q?: string;
+  company?: string;
+  location?: string;
+  source?: string;
+  has_matches?: boolean;
+  state?: JobStateFilter;
+  sort?: JobSort;
 }
 
 export interface JobListResponse {
@@ -94,6 +126,21 @@ export interface DiscoverJobsResponse {
   jobs_created: number;
   jobs_updated: number;
   jobs: Job[];
+}
+
+export interface JobImportExtraction {
+  source: string;
+  title_source: "url_slug" | "stored_record" | "unavailable" | string;
+  description_available: boolean;
+  missing_fields: string[];
+  notes: string[];
+}
+
+export interface ImportJobResponse {
+  job: Job;
+  created: boolean;
+  reused: boolean;
+  extraction: JobImportExtraction;
 }
 
 export interface MatchScoreBreakdown {
@@ -324,6 +371,11 @@ export interface ApplicationPreview {
   job_listing_url: string | null;
   employer_careers_url: string | null;
   application_url_is_job_board: boolean;
+  application_destination_url?: string | null;
+  destination_platform?: string | null;
+  destination_validated?: boolean;
+  redirect_status?: RedirectStatus;
+  redirect_flow?: boolean;
   suggested_application_url: string | null;
   automation_mode: AutomationMode;
   inspection_mode: InspectionMode;
@@ -385,6 +437,17 @@ export interface ApplicationSummary {
 export interface ApplicationListResponse {
   total: number;
   applications: ApplicationSummary[];
+}
+
+/** Aggregated by the backend from the stored status/stage columns. */
+export interface ApplicationPipeline {
+  total: number;
+  in_progress: number;
+  submitted: number;
+  failed: number;
+  cancelled: number;
+  by_stage: Record<ApplicationStage, number>;
+  recent: ApplicationSummary[];
 }
 
 export interface SubmissionResponse {
@@ -605,8 +668,144 @@ export interface ApplicationAnswer {
   is_sensitive: boolean;
   is_legal: boolean;
   verified_at: string | null;
+  answer_source?: AnswerSource;
+  confidence?: number;
+  source_record_id?: string | null;
+  last_confirmed_at?: string | null;
+  freshness_days?: number | null;
   created_at: string;
   updated_at: string;
+}
+
+export type AnswerCategory =
+  | "personal_introduction"
+  | "work_experience"
+  | "projects"
+  | "technical_skills"
+  | "achievements"
+  | "strengths"
+  | "career_goals"
+  | "education"
+  | "other";
+
+export type AnswerTrustLevel =
+  | "verified_fact"
+  | "user_reviewed"
+  | "resume_suggestion"
+  | "ai_draft"
+  | "user_written"
+  | "needs_information";
+
+/** A saved answer with the category and trust derived by the backend. */
+export interface SavedAnswer extends ApplicationAnswer {
+  category: AnswerCategory;
+  category_label: string;
+  trust_level: AnswerTrustLevel;
+  trust_label: string;
+  trust_reason: string;
+  needs_review: boolean;
+  needs_information: boolean;
+  is_stale: boolean;
+  freshness_reason: string | null;
+}
+
+export interface AnswerCategoryCount {
+  category: AnswerCategory;
+  label: string;
+  count: number;
+}
+
+export interface AnswerCategoryOverview {
+  total: number;
+  categories: AnswerCategoryCount[];
+  trust_levels: Partial<Record<AnswerTrustLevel, number>>;
+}
+
+export interface SavedAnswerEvidence {
+  id: string;
+  kind: "answer" | "profile" | "resume" | "application" | "source";
+  label: string;
+  detail: string;
+  source: string;
+  verified: boolean;
+}
+
+export interface SavedAnswerDetail {
+  answer: SavedAnswer;
+  evidence: SavedAnswerEvidence[];
+  conflicts: AnswerDraftCitationConflict[];
+}
+
+export interface KnowledgeMissingItem {
+  field: string;
+  label: string;
+  section: string;
+  required: boolean;
+  kind: "profile_field" | "answer";
+  question_key: string | null;
+  reason: string;
+}
+
+export interface KnowledgeUnverifiedItem {
+  question_key: string;
+  question_text: string;
+  trust_level: AnswerTrustLevel;
+  trust_label: string;
+  reason: string;
+}
+
+export interface StaleAnswer {
+  question_key: string;
+  question_text: string;
+  last_confirmed_at: string | null;
+  age_days: number | null;
+  max_age_days: number;
+  reason: string;
+}
+
+export interface CandidateKnowledge {
+  total_answers: number;
+  verified_answers: number;
+  needs_review: number;
+  missing_information: KnowledgeMissingItem[];
+  conflicts: AnswerDraftCitationConflict[];
+  outdated: StaleAnswer[];
+  unverified: KnowledgeUnverifiedItem[];
+  summary: string;
+  disclaimer: string;
+}
+
+export interface ReusableAnswerSuggestion {
+  question_key: string;
+  question_text: string;
+  answer: string;
+  answer_source: AnswerSource;
+  verification_status: VerificationStatus;
+  category: AnswerCategory;
+  category_label: string;
+  trust_level: AnswerTrustLevel;
+  trust_label: string;
+  trust_reason: string;
+  relevance: number;
+  reason: string;
+  last_confirmed_at: string | null;
+  updated_at: string;
+  requires_review: boolean;
+  safe_to_insert: boolean;
+  is_stale: boolean;
+  freshness_reason: string | null;
+  conflicts: AnswerDraftCitationConflict[];
+}
+
+export interface ReusableAnswerSuggestions {
+  application_id: string;
+  job_id: string;
+  job_title: string;
+  company: string | null;
+  question_key: string;
+  question_text: string;
+  suggestions: ReusableAnswerSuggestion[];
+  message: string;
 }
 
 export interface CandidateProfile {
@@ -926,18 +1125,62 @@ export interface FillResumeSelection {
   reason: string;
 }
 
+export type FieldVerificationStatus = "verified" | "derived" | "unverified";
+
+export type FieldSensitivityStatus =
+  | "public"
+  | "sensitive"
+  | "legal"
+  | "credential"
+  | "verification"
+  | "demographic";
+
+export interface FieldProvenance {
+  source: string;
+  source_record_id: string | null;
+  last_confirmed_at: string | null;
+  confidence: number;
+  stale: boolean;
+  explanation: string;
+}
+
+/**
+ * One canonical application field. This is the same shape the backend uses for
+ * analysis, plan preview and approval; the frontend never receives Playwright
+ * selectors, HTML, cookies or credential values.
+ */
 export interface FillPlanField {
   field_id: string;
+  question_key: string | null;
+  name: string | null;
   label: string;
+  accessible_name: string;
+  options: string[];
   field_type: string;
+  input_type: string;
   classification: string;
   required: boolean;
+  visible: boolean;
+  current_value: string | null;
+  proposed_value: string | null;
+  candidate_answer: string | null;
+  source: string;
+  provenance: FieldProvenance;
+  verification_status: FieldVerificationStatus;
+  sensitivity: FieldSensitivityStatus;
+  fillable: boolean;
+  requires_confirmation: boolean;
+  already_populated: boolean;
+  conflicting: boolean;
+  form_index: number;
+  page_url: string | null;
+  application_step: string | null;
+  locator_ref: string;
+  analyzed_at: string | null;
+  duplicate_of: string | null;
   action: FillAction;
   status: FillFieldStatus;
-  proposed_value: string | null;
-  source: string;
   confidence: number;
-  options: string[];
   reason: string;
 }
 
@@ -947,6 +1190,11 @@ export interface FillPlanResponse {
   analysis_version: number;
   browser_session_id: string;
   generated_at: string;
+  page_url: string | null;
+  application_step: string | null;
+  analyzed_at: string | null;
+  structure_fingerprint: string;
+  approval_fingerprint: string;
   total_fields: number;
   eligible_count: number;
   confirmation_count: number;
@@ -1018,6 +1266,32 @@ export interface BrowserViewInfo {
   required_component: string | null;
 }
 
+export type RedirectStatus =
+  | "not_started"
+  | "awaiting_user_action"
+  | "validated"
+  | "unsupported"
+  | "rejected";
+
+export interface ApplicationRedirectResponse {
+  application_id: string;
+  browser_session_id: string | null;
+  status: RedirectStatus;
+  message: string;
+  listing_url: string | null;
+  destination_url: string | null;
+  application_platform: string | null;
+  platform_name: string | null;
+  application_step: string | null;
+  step_supported: boolean;
+  destination_validated: boolean;
+  awaiting_user_action: boolean;
+  can_analyze: boolean;
+  authentication_required: boolean;
+  manual_destination?: boolean;
+  warnings: string[];
+}
+
 export interface BrowserSession {
   session_id: string;
   application_id: string;
@@ -1025,6 +1299,12 @@ export interface BrowserSession {
   job_title: string;
   company: string | null;
   application_url: string;
+  listing_url?: string | null;
+  application_destination_url?: string | null;
+  destination_platform?: string | null;
+  destination_validated?: boolean;
+  redirect_status?: RedirectStatus;
+  redirect_flow?: boolean;
   run_number: number;
   state: string;
   browser_status: string;
@@ -1050,6 +1330,29 @@ export interface BrowserSessionCapabilitiesResponse {
   automation_enabled: boolean;
   session_ttl_seconds: number;
   final_submission_note: string;
+}
+
+export interface BrowserSessionBlocker {
+  session_id: string;
+  application_id: string;
+  job_id: string | null;
+  job_title: string;
+  company: string | null;
+  state: string;
+  browser_status: string;
+}
+
+export interface BrowserSessionRecoveryResponse {
+  recovered: boolean;
+  session: BrowserSession | null;
+  blocked_by: BrowserSessionBlocker[];
+  closed_session_ids: string[];
+  message: string;
+}
+
+export interface BrowserSessionListResponse {
+  total: number;
+  sessions: BrowserSession[];
 }
 
 export interface BrowserViewTicketResponse {
@@ -1415,4 +1718,66 @@ export interface SessionResponse {
 export interface ValidationDetail {
   loc: Array<string | number>;
   msg: string;
+}
+
+export type AnswerDraftStatus =
+  | "drafted"
+  | "needs_confirmation"
+  | "insufficient_information"
+  | "unavailable";
+
+export interface AnswerDraftEvidence {
+  id: string;
+  kind: "profile" | "resume" | "job" | "answer_bank";
+  label: string;
+  detail: string;
+  source: string;
+  verified: boolean;
+  confidence: "high" | "medium" | "low";
+  used: boolean;
+}
+
+export interface AnswerMissingInformation {
+  field: string;
+  question: string;
+  reason: string;
+  sensitive: boolean;
+}
+
+export interface AnswerDraftCitationConflict {
+  question_key: string;
+  question_text: string;
+  category: string | null;
+  stored_answer: string;
+  conflicting_answer: string;
+  conflicting_source: string;
+  reason: string;
+  resolution_options: string[];
+}
+
+export interface AnswerDraft {
+  application_id: string | null;
+  job_id: string;
+  job_title: string;
+  company: string | null;
+  question_id: string | null;
+  question_key: string;
+  question_text: string;
+  question_type: QuestionType | null;
+  answer_type: AnswerType;
+  is_sensitive: boolean;
+  is_legal: boolean;
+  status: AnswerDraftStatus;
+  draft_answer: string | null;
+  confidence: number;
+  confidence_label: "high" | "medium" | "low";
+  evidence: AnswerDraftEvidence[];
+  missing_information: AnswerMissingInformation[];
+  conflicts: AnswerDraftCitationConflict[];
+  inferred_claims: string[];
+  warnings: string[];
+  save_reusable_allowed: boolean;
+  llm_status: string;
+  llm_model: string | null;
+  disclaimer: string;
 }

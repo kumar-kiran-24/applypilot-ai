@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 
+import { ApplicationPipelineCard } from "@/components/dashboard/application-pipeline";
+import { ApplyJobCard } from "@/components/dashboard/apply-job-card";
 import { DashboardStats } from "@/components/dashboard/dashboard-stats";
 import { JobRecommendations } from "@/components/dashboard/job-recommendations";
 import { RecentActivity } from "@/components/dashboard/recent-activity";
@@ -26,7 +28,9 @@ export default async function DashboardPage() {
   return (
     <div className="space-y-6 animate-fade-in">
       <WelcomeBanner name={firstName(user.full_name)} />
+      <ApplyJobCard />
       <DashboardStats />
+      <ApplicationPipelineCard />
 
       <div className="grid gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">

@@ -6,32 +6,108 @@ import {
   analyzeJob,
   bulkMatchJob,
   compareResumes,
+  dismissJob,
   discoverJobs,
+  fetchJob,
   fetchJobIntelligence,
   fetchJobMatches,
   fetchJobs,
   fetchMatchingSummary,
   fetchResumeRecommendation,
+  fetchSavedJobs,
+  importJob,
   jobKeys,
   matchJob,
+  restoreJob,
+  setJobSaved,
 } from "@/features/jobs/api";
 import type {
   BulkMatchRequest,
   BulkMatchResponse,
   DiscoverJobsResponse,
+  ImportJobResponse,
+  Job,
   JobIntelligenceResponse,
-  JobMatchesResponse,
+  JobListQuery,
   JobListResponse,
+  JobMatchesResponse,
   MatchingSummary,
   ResumeComparisonResponse,
 } from "@/types/api";
 
-export function useJobs({ limit = 50, offset = 0 } = {}) {
+/**
+ * Imports a pasted Glassdoor listing. A duplicate returns the same job id with
+ * `reused: true`, so navigation cannot fork the job library.
+ */
+export function useImportJob() {
+  const queryClient = useQueryClient();
+  return useMutation<ImportJobResponse, Error, string>({
+    mutationFn: (url) => importJob(url),
+    onSuccess: async (data) => {
+      queryClient.setQueryData(jobKeys.detail(data.job.id), data.job);
+      await queryClient.invalidateQueries({ queryKey: jobKeys.all });
+      await queryClient.invalidateQueries({ queryKey: jobKeys.summary });
+    },
+  });
+}
+
+export function useJobs(query: JobListQuery = {}) {
   return useQuery<JobListResponse>({
-    queryKey: jobKeys.list(limit, offset),
-    queryFn: () => fetchJobs(limit, offset),
+    queryKey: jobKeys.list(query),
+    queryFn: () => fetchJobs(query),
     staleTime: 30_000,
   });
+}
+
+export function useSavedJobs({ limit = 50, offset = 0 } = {}) {
+  return useQuery<JobListResponse>({
+    queryKey: jobKeys.saved(limit, offset),
+    queryFn: () => fetchSavedJobs(limit, offset),
+    staleTime: 30_000,
+  });
+}
+
+/** One owned posting. `enabled` lets a route wait for a real id. */
+export function useJob(jobId: string, { enabled = true } = {}) {
+  return useQuery<Job>({
+    queryKey: jobKeys.detail(jobId),
+    queryFn: () => fetchJob(jobId),
+    enabled: enabled && Boolean(jobId),
+    retry: false,
+  });
+}
+
+/**
+ * Saving, dismissing and restoring all change which list a posting appears in,
+ * so every cached job query is invalidated after one succeeds.
+ */
+function useJobStateMutation(
+  mutationFn: (jobId: string) => Promise<Job>,
+) {
+  const queryClient = useQueryClient();
+  return useMutation<Job, Error, string>({
+    mutationFn,
+    onSuccess: async (job) => {
+      queryClient.setQueryData(jobKeys.detail(job.id), job);
+      await queryClient.invalidateQueries({ queryKey: jobKeys.all });
+    },
+  });
+}
+
+export function useSaveJob() {
+  return useJobStateMutation((jobId) => setJobSaved(jobId, true));
+}
+
+export function useUnsaveJob() {
+  return useJobStateMutation((jobId) => setJobSaved(jobId, false));
+}
+
+export function useDismissJob() {
+  return useJobStateMutation(dismissJob);
+}
+
+export function useRestoreJob() {
+  return useJobStateMutation(restoreJob);
 }
 
 /**

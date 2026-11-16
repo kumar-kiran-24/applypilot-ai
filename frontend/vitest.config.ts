@@ -8,7 +8,12 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["tests/**/*.test.{ts,tsx}"],
+    setupFiles: ["tests/setup.ts"],
     restoreMocks: true,
+    // React Testing Library suites render several QueryClient trees and take a
+    // few seconds each; the 5s default intermittently fails under full-suite
+    // parallel load on a busy machine even though every assertion passes.
+    testTimeout: 15_000,
   },
   resolve: {
     alias: {
